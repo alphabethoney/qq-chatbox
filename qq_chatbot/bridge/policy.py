@@ -15,6 +15,13 @@ from ..config import Config
 from ..session import Session
 
 _AT = re.compile(r"\[CQ:at,qq=\d+\]")
+_SENT_SPLIT = re.compile(r"(?<=[。！？!?；;])")
+
+
+def _split_sentences(text: str, max_n: int = 6) -> list[str]:
+    """把回复按句号/感叹号/问号等切句，逐条发出（更像真人）。"""
+    parts = [p.strip() for p in _SENT_SPLIT.split(text) if p.strip()]
+    return parts[:max_n] if parts else [text]
 
 
 def _text_of(event: dict) -> str:
@@ -121,6 +128,9 @@ class BridgeRuntime:
         session.add(text, ans.text)
         if ans.citations:
             self.last_cites[key] = ans.citations
+        if self.cfg.split_sentences:
+            return [self._reply(group_id, user_id, msg_type, s)
+                    for s in _split_sentences(ans.text, self.cfg.max_sentences)]
         return [self._reply(group_id, user_id, msg_type, ans.text)]
 
     # ---- 内部 -------------------------------------------------------------

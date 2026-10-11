@@ -59,6 +59,8 @@ class BridgeConfig:
     group_trigger: str = "at"              # 群聊触发方式 at | all
     restrict_group_scope: bool = True      # 群聊 qa 只检索本群记录
     rate_limit_per_min: int = 30           # 每会话每分钟回复上限（0=不限）
+    split_sentences: bool = False          # 回复按句子拆成多条逐条发出
+    max_sentences: int = 6                 # 拆句后最多发几条
 
 
 @dataclass
@@ -175,7 +177,7 @@ def _coerce_numbers(cfg: Config) -> None:
         (cfg.embedding, ("dim",)),
         (cfg.retrieval, ("top_k", "vector_weight", "min_score")),
         (cfg.session, ("max_turns",)),
-        (cfg.bridge, ("self_id", "rate_limit_per_min")),
+        (cfg.bridge, ("self_id", "rate_limit_per_min", "max_sentences")),
     ):
         for a in attrs:
             try:

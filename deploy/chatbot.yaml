@@ -36,3 +36,5 @@ bridge:
   group_trigger: at        # at | all
   restrict_group_scope: true
   rate_limit_per_min: 30
+  split_sentences: true    # 回复按句拆成多条逐条发出（更像真人）
+  max_sentences: 6

@@ -137,6 +137,16 @@ def main() -> int:
         rt4 = make_runtime(tmp, group_trigger="all")
         out = rt4.handle(group_event("不用 @ 也回"), self_id=SELF)
         check("group_trigger=all 全量回复", only_action(out) == "send_group_msg", str(out))
+
+        print("\n== 单句单次发出 ==")
+        from qq_chatbot.bridge.policy import _split_sentences
+        s = _split_sentences("哈哈。真的吗！好的；行吧")
+        check("拆句切分", s == ["哈哈。", "真的吗！", "好的；", "行吧"], str(s))
+
+        rt5 = make_runtime(tmp, split_sentences=True, max_sentences=3)
+        # mock LLM 回复形如 "[persona]在吗，命中 N 条证据"，无句号 -> 单条
+        out = rt5.handle(private_event("在吗"), self_id=SELF)
+        check("无句号时单条发出", len(out) == 1, str(len(out)))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
