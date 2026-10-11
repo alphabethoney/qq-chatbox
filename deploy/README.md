@@ -116,6 +116,21 @@ sudo systemctl status qq-chatbot
 journalctl -u qq-chatbot -f
 ```
 
+### 3.5 重建人格档案（可选，数字分身模式）
+
+人格档案（说话风格 / 事实 / 观点 / 关系 / 时间线）会在 persona 模式**首次问话时自动生成**，
+也可以手动重建并落盘存档（先加载 `.env` 里的 API key 再跑）：
+
+```bash
+cd /home/<用户>/qq-chatbot
+set -a && . ./.env && set +a
+python3 -m qq_chatbot profile --person <persona_person> --config chatbot.yaml
+```
+
+- 产出 `.chatbot/profiles/<key>.json`，其中含 `timeline`（时间线记忆）。
+- 该命令生成的是「合并」档案（私聊 + 群聊一起）；运行时仍会按「私聊 / 群聊」分开各生成一份用于回答。
+- 档案依赖 LLM（事实/观点/关系/时间线），需要 API key 有效；离线风格统计与 `topics` 则从语料确定性算出。
+
 ---
 
 ## 验证
