@@ -31,11 +31,16 @@ def _run(cmd: list[str]) -> None:
     subprocess.run(cmd, check=True)
 
 
-def decrypt(live_db: Path, passphrase: str, plain_db: Path) -> None:
+def decrypt(live_db: Path, plain_db: Path, *, key: str = "", passphrase: str = "") -> None:
     from qq_exporter import sqlcipher
 
-    key = sqlcipher.key_from_passphrase(live_db, passphrase)
-    stats = sqlcipher.decrypt_database(live_db, plain_db, key, progress=None)
+    if key:
+        enc_key = bytes.fromhex(key)
+    else:
+        enc_key = sqlcipher.key_from_passphrase(live_db, passphrase)
+    # 注意：QQ 9.9.x 的 -wal 文件用现有逻辑合并会损坏整库（quick_check 报 malformed），
+    # 这里跳过 WAL，只解主库；主库本身可读，偶发 B-tree 坏页交给容错导出处理。
+    stats = sqlcipher.decrypt_database(live_db, plain_db, enc_key, merge_wal=False, progress=None)
     print(f"解密完成: {plain_db}  页数={stats['pages']}  quick_check={stats['integrity']}", flush=True)
     if stats["integrity"] != "ok":
         print("警告: quick_check 未通过，后续容错导出会跳过坏页", flush=True)
@@ -132,6 +137,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--passphrase", help="16 字符 ASCII 口令")
     ap.add_argument("--passphrase-file", help="只含口令的文件（比命令行更安全）")
+    ap.add_argument("--key", help="32 字节密钥（hex 64 字符），优先于口令")
     ap.add_argument("--live-db", default=str(DEFAULT_LIVE_DB), help="导出账号当前库路径")
     ap.add_argument("--person", default="10001", help="只索引这个 QQ 号的人")
     ap.add_argument("--base-json", default="out/json", help="全量历史导出目录（首次同步保留）")
@@ -144,8 +150,8 @@ def main() -> int:
     passphrase = args.passphrase
     if not passphrase and args.passphrase_file:
         passphrase = Path(args.passphrase_file).read_text(encoding="utf-8").strip()
-    if not passphrase:
-        print("需要 --passphrase 或 --passphrase-file")
+    if not args.key and not passphrase:
+        print("需要 --passphrase / --passphrase-file 或 --key")
         return 1
 
     work = Path(args.work)
@@ -153,7 +159,7 @@ def main() -> int:
     merged_json = work / "merged" / "json"
     plain_db = work / "plain" / "nt_msg.db"
 
-    decrypt(Path(args.live_db), passphrase, plain_db)
+    decrypt(Path(args.live_db), plain_db, key=args.key or "", passphrase=passphrase or "")
     export_fault_tolerant(plain_db, work / "live")
 
     base_json = Path(args.base_json)

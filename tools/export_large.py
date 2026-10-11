@@ -49,6 +49,19 @@ def _fmt(ts):
         return ""
 
 
+def _to_str(v):
+    """把 SQLite 里可能是 bytes 的 uid 字段转成字符串。"""
+    if isinstance(v, (bytes, bytearray)):
+        b = bytes(v)
+        try:
+            return b.decode("utf-8")
+        except UnicodeDecodeError:
+            return b.hex()
+    if v is None:
+        return ""
+    return str(v)
+
+
 def _lean(row, me):
     """row 是一段按 MSG_COLS 顺序的值序列，转成标准消息 dict（与 iter_messages 同构，供 qq_chatbot 使用）。
 
@@ -65,9 +78,9 @@ def _lean(row, me):
         "time": ts,
         "time_str": _fmt(ts),
         "direction": "out" if (sq is not None and str(sq) == str(me)) else "in",
-        "sender_uid": m.get("40020"),
+        "sender_uid": _to_str(m.get("40020")),
         "sender_qq": sq,
-        "peer_uid": m.get("40021"),
+        "peer_uid": _to_str(m.get("40021")),
         "peer_qq": _to_int(m.get("40030")),
         "msg_type": _to_int(m.get("40011")),
         "subtype": _to_int(m.get("40012")),
