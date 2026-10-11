@@ -15,11 +15,12 @@ from ..config import Config
 from ..session import Session
 
 _AT = re.compile(r"\[CQ:at,qq=\d+\]")
-_SENT_SPLIT = re.compile(r"(?<=[。！？!?；;])")
+# 拆句：优先按换行(回车)，其次按句末标点（保留标点）
+_SENT_SPLIT = re.compile(r"\n+|(?<=[。！？!?；;])")
 
 
 def _split_sentences(text: str, max_n: int = 6) -> list[str]:
-    """把回复按句号/感叹号/问号等切句，逐条发出（更像真人）。"""
+    """把回复按换行/句末标点拆成多条，逐条发出（更像真人）。"""
     parts = [p.strip() for p in _SENT_SPLIT.split(text) if p.strip()]
     return parts[:max_n] if parts else [text]
 
