@@ -1,0 +1,31 @@
+# 主机运行时配置（当前为「冒烟测试」默认：mock LLM + hash 向量，零外部依赖）。
+# 要真实回复，把 llm / embedding 改成 ollama 或 openai，见 chatbot.yaml.example。
+
+llm:
+  provider: mock          # 改成 ollama / openai
+  model: ""
+  base_url: ""
+  api_key: ""
+
+embedding:
+  provider: hash          # 与读取机 build 时保持一致
+  dim: 256
+
+store:
+  dir: /home/example-user/qq-chatbot/.chatbot
+
+retrieval:
+  top_k: 8
+  vector_weight: 0.7
+  min_score: 0.35
+
+session:
+  max_turns: 12
+
+bridge:
+  ws_url: ws://127.0.0.1:3001
+  mode: qa                 # qa | persona
+  persona_person: ""
+  group_trigger: at        # at | all
+  restrict_group_scope: true
+  rate_limit_per_min: 30

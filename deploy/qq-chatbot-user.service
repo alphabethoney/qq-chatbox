@@ -1,0 +1,22 @@
+# 用户级 systemd 单元（无需 sudo，装到 ~/.config/systemd/user/）。
+# 注意：机器人依赖 .chatbot/ 索引 与 NapCat 的 OneBot11 WS，就绪后再 start。
+
+[Unit]
+Description=qq-chatbot（QQ 聊天记录问答/数字分身机器人）
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/qq-chatbot
+ExecStart=/usr/bin/python3 -m qq_chatbot qq \
+    --ws ws://127.0.0.1:3001 \
+    --store %h/qq-chatbot/.chatbot \
+    --config %h/qq-chatbot/chatbot.yaml
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+UMask=0077
+
+[Install]
+WantedBy=default.target
