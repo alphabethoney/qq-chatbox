@@ -33,6 +33,9 @@ class Chatbot:
         mode: str = "qa",
         person: str | None = None,
         session: Session | None = None,
+        conversation: str | None = None,
+        kind: str | None = None,
+        time_range: tuple[int, int] | None = None,
     ) -> Answer:
         if mode == "persona":
             if not person:
@@ -40,6 +43,12 @@ class Chatbot:
             filters: dict = {"speaker": person}
         else:
             filters = {}
+        if conversation is not None:
+            filters["conversation"] = conversation
+        if kind is not None:
+            filters["kind"] = kind
+        if time_range is not None:
+            filters["time_range"] = time_range
 
         retrieved = self.retriever.retrieve(query, **filters)
         history = session.as_messages() if session else None

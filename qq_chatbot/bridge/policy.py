@@ -1,0 +1,154 @@
+"""桥接策略：把 OneBot11 事件翻译成机器人回答与发消息动作。
+
+本模块是**纯逻辑**（不依赖网络），便于单元测试；传输层在 ``onebot.py``。
+"""
+
+from __future__ import annotations
+
+import re
+import time
+from collections import defaultdict
+from dataclasses import dataclass
+
+from ..chat import Chatbot
+from ..config import Config
+from ..session import Session
+
+_AT = re.compile(r"\[CQ:at,qq=\d+\]")
+
+
+@dataclass
+class Outbound:
+    action: str
+    params: dict
+    echo: str = ""
+
+
+class BridgeRuntime:
+    """持有聊天机器人 + 桥接配置 + 每个会话的运行时状态。"""
+
+    def __init__(self, chatbot: Chatbot, config: Config) -> None:
+        self.bot = chatbot
+        self.cfg = config.bridge
+        self.modes: dict[str, str] = {}
+        self.persons: dict[str, str] = {}
+        self.sessions: dict[str, Session] = {}
+        self.last_cites: dict[str, list] = {}
+        self._hits: dict[str, list[float]] = defaultdict(list)
+
+    # ---- 主入口 -----------------------------------------------------------
+
+    def handle(self, event: dict, self_id: int = 0) -> list[Outbound]:
+        if event.get("post_type") != "message":
+            return []
+        msg_type = event.get("message_type")
+        user_id = event.get("user_id")
+        raw = (event.get("raw_message") or "").strip()
+        if not raw:
+            return []
+
+        sid = self.cfg.self_id or self_id
+        if sid and user_id == sid:
+            return []  # 忽略机器人自己发的消息
+
+        group_id = None
+        if msg_type == "group":
+            group_id = event.get("group_id")
+            if not self._should_reply_group(raw, sid):
+                return []
+            key = f"group:{group_id}"
+            text = _AT.sub("", raw).strip()
+            if not text:
+                text = "你好"
+        elif msg_type == "private":
+            key = f"private:{user_id}"
+            text = raw
+        else:
+            return []
+
+        parts = self._parse_command(text)
+        if parts is not None:
+            return self._handle_command(key, parts, group_id, user_id, msg_type)
+
+        if not self._allow(key):
+            return []
+
+        mode, person = self._resolve_mode(key)
+        if mode == "persona" and not person:
+            return [self._reply(group_id, user_id, msg_type,
+                               "persona 模式需要先指定说话人：发送 /persona <key>")]
+
+        session = self.sessions.setdefault(key, Session(self.bot.config.session.max_turns))
+        try:
+            if msg_type == "group" and self.cfg.restrict_group_scope:
+                ans = self.bot.answer(text, mode=mode, person=person, session=session,
+                                      conversation=f"group:{group_id}")
+            else:
+                ans = self.bot.answer(text, mode=mode, person=person, session=session)
+        except ValueError as exc:
+            return [self._reply(group_id, user_id, msg_type, f"错误：{exc}")]
+
+        session.add(text, ans.text)
+        if ans.citations:
+            self.last_cites[key] = ans.citations
+        return [self._reply(group_id, user_id, msg_type, ans.text)]
+
+    # ---- 内部 -------------------------------------------------------------
+
+    def _should_reply_group(self, raw: str, self_id: int) -> bool:
+        if self.cfg.group_trigger == "all":
+            return True
+        if not self_id:
+            return False  # 未知机器人号时，@ 判定不可靠
+        return f"[CQ:at,qq={self_id}]" in raw
+
+    @staticmethod
+    def _parse_command(text: str) -> list[str] | None:
+        if not text.startswith("/"):
+            return None
+        parts = text[1:].strip().split()
+        return parts or None
+
+    def _resolve_mode(self, key: str) -> tuple[str, str]:
+        return self.modes.get(key, self.cfg.mode), self.persons.get(key, self.cfg.persona_person)
+
+    def _allow(self, key: str) -> bool:
+        if self.cfg.rate_limit_per_min <= 0:
+            return True
+        now = time.time()
+        q = self._hits[key]
+        q[:] = [t for t in q if now - t < 60.0]
+        if len(q) >= self.cfg.rate_limit_per_min:
+            return False
+        q.append(now)
+        return True
+
+    def _reply(self, group_id, user_id, msg_type: str, text: str) -> Outbound:
+        if msg_type == "group":
+            return Outbound("send_group_msg", {"group_id": group_id, "message": text})
+        return Outbound("send_private_msg", {"user_id": user_id, "message": text})
+
+    def _handle_command(self, key, parts, group_id, user_id, msg_type) -> list[Outbound]:
+        cmd = parts[0].lower()
+
+        def reply(t: str) -> list[Outbound]:
+            return [self._reply(group_id, user_id, msg_type, t)]
+
+        if cmd in ("qa", "问答"):
+            self.modes[key] = "qa"
+            return reply("已切换到历史问答模式。")
+        if cmd == "persona":
+            if len(parts) < 2:
+                return reply("用法：/persona <说话人key>，例如 /persona c2c:10001")
+            self.modes[key] = "persona"
+            self.persons[key] = parts[1]
+            return reply(f"已切换到数字分身：{parts[1]}")
+        if cmd in ("cite", "出处"):
+            cites = self.last_cites.get(key)
+            if not cites:
+                return reply("（尚无出处）")
+            lines = [f"· {c.conversation_key} {c.time_str} {c.speaker}: {c.text}" for c in cites]
+            return reply("上一条出处：\n" + "\n".join(lines))
+        if cmd in ("help", "帮助"):
+            return reply("命令：/qa 切换历史问答 · /persona <key> 切换数字分身 · /cite 出处 · /help")
+        return reply(f"未知命令：{cmd}（/help 查看）")

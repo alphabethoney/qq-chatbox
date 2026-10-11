@@ -43,7 +43,7 @@ plain.db ──(复用 qq_exporter.collect.build_conversations)─────�
 qq_chatbot/
 ├── __init__.py          # __version__
 ├── __main__.py          # python -m qq_chatbot 入口
-├── cli.py               # 子命令：build / chat / ask / profile / serve
+├── cli.py               # 子命令：build / chat / ask / profile / serve / qq
 ├── config.py            # 配置 dataclass + 文件加载 + 环境变量覆盖
 ├── schema.py            # 规范数据模型：Speaker / Turn / Corpus / PersonaProfile / Answer
 ├── ingest.py            # 从 plain.db 或 JSON 目录装载成 Corpus
@@ -52,7 +52,10 @@ qq_chatbot/
 ├── prompt.py            # persona / qa 两套提示词模板与拼装
 ├── session.py           # 对话记忆（短期环形缓冲 + 长期摘要）
 ├── chat.py              # 交互式 REPL 与 Chatbot 编排
-├── serve.py             # 可选 HTTP API（FastAPI）
+├── serve.py             # HTTP API（纯 stdlib：GET /health、POST /chat）
+├── bridge/
+│   ├── onebot.py        # NapCat OneBot11 WebSocket 传输层
+│   └── policy.py        # 事件→回答策略（@触发/作用域/限流/命令），纯逻辑可单测
 ├── llm/
 │   ├── base.py          # LLMProvider / EmbeddingProvider 抽象
 │   ├── openai.py        # OpenAI 兼容客户端
@@ -172,7 +175,34 @@ class LLMProvider(Protocol):
 
 - `session.py`：短期窗口保留最近 N 轮；超窗后做 LLM 摘要并入长期记忆。
 - `chat.py`：`Chatbot` 编排（检索 → 拼提示 → 生成 → 返回带出处的 `Answer`），REPL 支持 `/persona X`、`/qa`、`/cite`。
-- `serve.py`：可选 FastAPI，`POST /chat`、`GET /health`。
+- `serve.py`：纯 stdlib 的 HTTP 服务（`ThreadingHTTPServer`），提供 `GET /health` 与 `POST /chat`，零额外依赖。
+
+### 4.8 bridge/ —— 接入 QQ（NapCat OneBot11）
+
+`bridge/onebot.py` 连 NapCat 的正向 WebSocket（需要 `websocket-client`），把事件交给
+`bridge/policy.py` 的 `BridgeRuntime`（纯逻辑，可离线单测），再回传 `send_group_msg` /
+`send_private_msg`。同时支持**群聊 + 私聊**：
+
+- 触发：私聊直接回复；群聊默认需要 `@机器人`（可配 `group_trigger: all` 全量回复）。
+- 作用域：群聊 qa 默认只检索本群（`conversation=group:<gid>`）；私聊检索全部。
+- 模式：默认 `qa` / `persona`，群内/私聊可用命令切换：`/qa`、`/persona <key>`、`/cite`、`/help`。
+- 安全：忽略机器人自己发的消息、每会话每分钟限流、persona 只是「模仿口吻」而非登录对方账号。
+
+```powershell
+python -m qq_chatbot qq --ws ws://127.0.0.1:3001            # 群聊+私聊问答机器人
+python -m qq_chatbot qq --mode persona --person c2c:10001   # 数字分身机器人
+```
+
+配置项（`chatbot.yaml` 的 `bridge` 段）：
+```yaml
+bridge:
+  ws_url: ws://127.0.0.1:3001
+  mode: qa               # qa | persona
+  persona_person: ""     # persona 模式要模仿的人
+  group_trigger: at      # at | all
+  restrict_group_scope: true
+  rate_limit_per_min: 30
+```
 
 ---
 
@@ -185,6 +215,7 @@ python -m qq_chatbot chat --mode qa
 python -m qq_chatbot ask "我们上次约饭是什么时候"
 python -m qq_chatbot profile --person c2c:10001
 python -m qq_chatbot serve --port 8000
+python -m qq_chatbot qq --ws ws://127.0.0.1:3001   # 接入 QQ（群聊+私聊）
 ```
 
 `chatbot.yaml`（含默认值）：

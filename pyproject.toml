@@ -17,6 +17,8 @@ qq-chatbot = "qq_chatbot.cli:main"
 # 需要 YAML 配置时才装 PyYAML。
 chatbot = ["PyYAML>=6"]
 chatbot-http = ["fastapi>=0.100", "uvicorn>=0.23"]
+# 接入 QQ（NapCat OneBot11 WebSocket）。
+chatbot-qq = ["websocket-client>=1.6"]
 
 [build-system]
 requires = ["hatchling"]

@@ -240,6 +240,22 @@ retrieval: { top_k: 8, vector_weight: 0.7, min_score: 0.35 }
 
 > 注意：云端后端会把聊天内容发送到远程 API；本地 ollama 模式全程离线。索引与人格档案落在 `.chatbot/`，已被 `.gitignore` 排除。
 
+### 接入 QQ（群聊 + 私聊）
+
+机器人可以挂在 NapCat 的 OneBot11 WebSocket 上，作为**群聊 + 私聊**的问答/数字分身机器人：
+
+```powershell
+pip install websocket-client
+.\.venv\Scripts\python.exe -m qq_chatbot qq --ws ws://127.0.0.1:3001
+# 数字分身机器人：
+.\.venv\Scripts\python.exe -m qq_chatbot qq --mode persona --person c2c:10001
+```
+
+行为：私聊直接回复；群聊默认 `@机器人` 才回复（可配 `group_trigger: all` 全量回复）；
+群聊问答只检索本群记录；群内/私聊可用 `/qa`、`/persona <key>`、`/cite`、`/help` 切换。
+
+> persona 是「模仿口吻」，不是登录对方账号；冒充他人账号违反 QQ 协议，请用机器人账号承载。
+
 ---
 
 ## 风险与合规

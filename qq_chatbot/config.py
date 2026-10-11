@@ -51,12 +51,24 @@ class SessionConfig:
 
 
 @dataclass
+class BridgeConfig:
+    ws_url: str = "ws://127.0.0.1:3001"   # NapCat 正向 WebSocket 地址
+    self_id: int = 0                       # 机器人 QQ 号（0=从 lifecycle 事件自动获取）
+    mode: str = "qa"                       # 默认模式 qa | persona
+    persona_person: str = ""               # persona 模式要模仿的说话人 key
+    group_trigger: str = "at"              # 群聊触发方式 at | all
+    restrict_group_scope: bool = True      # 群聊 qa 只检索本群记录
+    rate_limit_per_min: int = 30           # 每会话每分钟回复上限（0=不限）
+
+
+@dataclass
 class Config:
     llm: LLMConfig = field(default_factory=LLMConfig)
     embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
     store: StoreConfig = field(default_factory=StoreConfig)
     retrieval: RetrievalConfig = field(default_factory=RetrievalConfig)
     session: SessionConfig = field(default_factory=SessionConfig)
+    bridge: BridgeConfig = field(default_factory=BridgeConfig)
 
     def to_dict(self) -> dict:
         return {
@@ -65,6 +77,7 @@ class Config:
             "store": {"type": self.store.type, "dir": str(self.store.dir)},
             "retrieval": _dc_dict(self.retrieval),
             "session": _dc_dict(self.session),
+            "bridge": _dc_dict(self.bridge),
         }
 
 
@@ -102,6 +115,8 @@ _ENV_MAP = {
     "QQ_CHATBOT_EMBEDDING_MODEL": ("embedding", "model"),
     "QQ_CHATBOT_EMBEDDING_BASE_URL": ("embedding", "base_url"),
     "QQ_CHATBOT_EMBEDDING_DIM": ("embedding", "dim"),
+    "QQ_CHATBOT_BRIDGE_WS": ("bridge", "ws_url"),
+    "QQ_CHATBOT_BRIDGE_MODE": ("bridge", "mode"),
 }
 
 
@@ -128,6 +143,7 @@ def load_config(path: str | Path | None = None, overrides: dict | None = None) -
         _apply_section(cfg.embedding, data.get("embedding"), env_prefix="", overrides=overrides.get("embedding"))
         _apply_section(cfg.retrieval, data.get("retrieval"), env_prefix="", overrides=overrides.get("retrieval"))
         _apply_section(cfg.session, data.get("session"), env_prefix="", overrides=overrides.get("session"))
+        _apply_section(cfg.bridge, data.get("bridge"), env_prefix="", overrides=overrides.get("bridge"))
         store = data.get("store") or {}
         if store.get("dir"):
             cfg.store.dir = Path(store["dir"])
@@ -144,8 +160,8 @@ def load_config(path: str | Path | None = None, overrides: dict | None = None) -
             val = int(val) if attr in ("max_tokens", "dim") else float(val)  # type: ignore[assignment]
         setattr(target, attr, val)
 
-    # CLI 覆盖（顶层 keys: llm/embedding/retrieval/session/store）
-    for section in ("llm", "embedding", "retrieval", "session"):
+    # CLI 覆盖（顶层 keys: llm/embedding/retrieval/session/store/bridge）
+    for section in ("llm", "embedding", "retrieval", "session", "bridge"):
         if section in overrides and isinstance(overrides[section], dict):
             _apply_section(getattr(cfg, section), overrides[section], env_prefix="", overrides=None)
 
@@ -159,6 +175,7 @@ def _coerce_numbers(cfg: Config) -> None:
         (cfg.embedding, ("dim",)),
         (cfg.retrieval, ("top_k", "vector_weight", "min_score")),
         (cfg.session, ("max_turns",)),
+        (cfg.bridge, ("self_id", "rate_limit_per_min")),
     ):
         for a in attrs:
             try:

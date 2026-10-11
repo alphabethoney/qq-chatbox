@@ -51,6 +51,8 @@ def cmd_build(args) -> int:
 
 def cmd_chat(args) -> int:
     cfg = load_config(args.config)
+    if args.store:
+        cfg.store.dir = Path(args.store)
     bot = load_chatbot(cfg)
     run_chat(bot, args.mode, args.person)
     return 0
@@ -58,6 +60,8 @@ def cmd_chat(args) -> int:
 
 def cmd_ask(args) -> int:
     cfg = load_config(args.config)
+    if args.store:
+        cfg.store.dir = Path(args.store)
     bot = load_chatbot(cfg)
     try:
         ans = bot.answer(args.question, mode=args.mode, person=args.person)
@@ -72,6 +76,8 @@ def cmd_ask(args) -> int:
 
 def cmd_profile(args) -> int:
     cfg = load_config(args.config)
+    if args.store:
+        cfg.store.dir = Path(args.store)
     bot = load_chatbot(cfg)
     profile = bot.profiles.get(args.person)
     if profile is None:
@@ -92,10 +98,29 @@ def cmd_profile(args) -> int:
 
 def cmd_serve(args) -> int:
     cfg = load_config(args.config)
+    if args.store:
+        cfg.store.dir = Path(args.store)
     bot = load_chatbot(cfg)
     from .serve import serve
 
     serve(bot, host=args.host, port=args.port)
+    return 0
+
+
+def cmd_qq(args) -> int:
+    cfg = load_config(args.config)
+    if args.store:
+        cfg.store.dir = Path(args.store)
+    if args.ws:
+        cfg.bridge.ws_url = args.ws
+    if args.mode:
+        cfg.bridge.mode = args.mode
+    if args.person:
+        cfg.bridge.persona_person = args.person
+    bot = load_chatbot(cfg)
+    from .bridge.onebot import run_bridge
+
+    run_bridge(bot, cfg)
     return 0
 
 
@@ -121,6 +146,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("chat", help="交互式聊天")
     p.add_argument("--mode", default="qa", choices=["qa", "persona"])
     p.add_argument("--person", help="persona 模式要模仿的说话人 key")
+    p.add_argument("--store", help="索引目录（默认 .chatbot，需与 build 的 --out 一致）")
     p.add_argument("--config")
     p.set_defaults(func=cmd_chat)
 
@@ -128,19 +154,30 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("question")
     p.add_argument("--mode", default="qa", choices=["qa", "persona"])
     p.add_argument("--person")
+    p.add_argument("--store", help="索引目录")
     p.add_argument("--config")
     p.set_defaults(func=cmd_ask)
 
     p = sub.add_parser("profile", help="生成/查看某说话人的人格档案")
     p.add_argument("--person", required=True)
+    p.add_argument("--store", help="索引目录")
     p.add_argument("--config")
     p.set_defaults(func=cmd_profile)
 
     p = sub.add_parser("serve", help="启动 HTTP 服务（/chat /health）")
     p.add_argument("--port", type=int, default=8000)
     p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--store", help="索引目录")
     p.add_argument("--config")
     p.set_defaults(func=cmd_serve)
+
+    p = sub.add_parser("qq", help="接入 QQ（NapCat OneBot11 正向 WebSocket，群聊+私聊）")
+    p.add_argument("--ws", help="NapCat 正向 WS 地址（默认 ws://127.0.0.1:3001）")
+    p.add_argument("--mode", choices=["qa", "persona"], help="默认模式")
+    p.add_argument("--person", help="persona 模式要模仿的说话人 key")
+    p.add_argument("--store", help="索引目录")
+    p.add_argument("--config")
+    p.set_defaults(func=cmd_qq)
 
     return ap
 
