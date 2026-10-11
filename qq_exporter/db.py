@@ -153,57 +153,79 @@ def _fmt_ts(ts: int | None) -> str:
         return ""
 
 
+# 消息体 MsgContent 的内容类型（字段 45002）-> 占位标签。
+# 1 是纯文本（特判，直接取 45101）；其余类型只输出占位符，
+# 避免把图片/文件/表情里的 URL、MD5、文件名等元数据误当正文。
+CONTENT_TYPE_LABELS: dict[int, str] = {
+    2: "图片",
+    3: "文件",
+    4: "语音",
+    5: "视频",
+    6: "表情",
+    7: "表情",
+    8: "回复",
+    10: "小程序",
+    11: "表情",
+    14: "闪传",
+    16: "卡片",
+    21: "通话",
+    26: "链接",
+}
+
+
+def _first_field(fields, number, wire_type):
+    for n, w, v in fields:
+        if n == number and w == wire_type:
+            return v
+    return None
+
+
 def parse_body(blob: bytes) -> tuple[str, list[dict]]:
     """从消息体 Protobuf 中提取文本与结构化片段。
 
     返回 ``(合并后的纯文本, 片段列表)``。
+
+    NTQQ 的消息体结构是 ``MsgBody { repeated MsgContent content = 40800 }``，
+    每个 ``MsgContent`` 用 ``45002``（内容类型）区分，``45101`` 才是文本正文。
     """
     if not blob:
         return "", []
 
-    segments: list[dict] = []
     try:
         fields = wire.parse_fields(blob)
     except wire.WireError:
         return "", []
 
-    # 常规路径：所有 45101 文本段
+    # 主路径：MsgBody -> 逐个 MsgContent 按内容类型处理
+    contents = [v for n, w, v in fields if n == 40800 and w == wire.WT_LEN]
+    if contents:
+        segments: list[dict] = []
+        texts: list[str] = []
+        for content in contents:
+            try:
+                inner = wire.parse_fields(content)
+            except wire.WireError:
+                continue
+            ctype = _first_field(inner, CONTENT_TYPE_FIELD, wire.WT_VARINT)
+            if ctype == 1:
+                raw = _first_field(inner, TEXT_FIELD, wire.WT_LEN)
+                text = wire.decode_text(raw) if raw else None
+                if text:
+                    texts.append(text)
+                    segments.append({"type": "text", "text": text})
+                continue
+            label = CONTENT_TYPE_LABELS.get(ctype, f"消息{ctype}" if ctype is not None else "消息")
+            texts.append(f"[{label}]")
+            segments.append({"type": "other", "content_type": ctype, "label": f"[{label}]"})
+        return "".join(texts), segments
+
+    # 兜底：结构不同 / 老格式时，退化为递归抓 45101 文本（不再抓 URL 等元数据）
     try:
         texts = wire.extract_text_segments(blob, text_field=TEXT_FIELD, max_depth=8)
     except wire.WireError:
         texts = []
-    for t in texts:
-        segments.append({"type": "text", "text": t})
-
-    if not segments:
-        # 回退：取所有看起来像人类文本的字符串（排除明显是元数据的短串）
-        for _path, number, wtype, value in wire.walk(blob, max_depth=6):
-            if wtype != wire.WT_LEN or number == TEXT_FIELD:
-                continue
-            text = wire.decode_text(value)
-            if text and len(text) >= 2 and not _looks_like_metadata(text):
-                segments.append({"type": "text", "text": text, "field": number})
-
-    merged = "".join(seg.get("text", "") for seg in segments)
-    return merged, segments
-
-
-_META_HINTS = (
-    "u_",
-    "http://",
-    "https://",
-    "nt_",
-    "com.tencent",
-    ".jpg",
-    ".png",
-    ".gif",
-    ".mp4",
-    "_ver",
-)
-
-
-def _looks_like_metadata(text: str) -> bool:
-    return any(h in text for h in _META_HINTS) and len(text) < 96
+    segments = [{"type": "text", "text": t} for t in texts]
+    return "".join(texts), segments
 
 
 def iter_messages(
