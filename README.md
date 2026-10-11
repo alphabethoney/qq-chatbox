@@ -254,6 +254,8 @@ pip install websocket-client
 行为：私聊直接回复；群聊默认 `@机器人` 才回复（可配 `group_trigger: all` 全量回复）；
 群聊问答只检索本群记录；群内/私聊可用 `/qa`、`/persona <key>`、`/cite`、`/help` 切换。
 
+> **读取与机器人分离部署**（Windows 导出 + Linux 主机跑机器人）见 [`deploy/README.md`](deploy/README.md)。
+
 > persona 是「模仿口吻」，不是登录对方账号；冒充他人账号违反 QQ 协议，请用机器人账号承载。
 
 ### 获取数据库口令（NapCat 插件）

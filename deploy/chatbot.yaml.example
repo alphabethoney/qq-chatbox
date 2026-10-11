@@ -1,0 +1,45 @@
+# Linux 主机部署示例配置。
+# 复制为 /opt/qq-chatbot/chatbot.yaml 并按需修改。
+
+# LLM：二选一
+# 1) 本地 ollama（离线）
+llm:
+  provider: ollama
+  model: qwen2.5:7b
+  base_url: http://127.0.0.1:11434
+# 2) 云端 OpenAI 兼容（可接通义/DeepSeek）
+# llm:
+#   provider: openai
+#   model: qwen-plus
+#   base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+#   api_key: "你的 key"
+
+# 向量化：需与「读取机 build 时」一致
+#  - 若读取机用默认 hash，则这里也用 hash（无需网络、无需重嵌）
+#  - 若读取机用 ollama/openai，索引里已存向量，这里需同 provider 用于查询向量化
+embedding:
+  provider: hash
+  # provider: ollama
+  # model: nomic-embed-text
+  # base_url: http://127.0.0.1:11434
+  dim: 256
+
+store:
+  dir: /opt/qq-chatbot/.chatbot
+
+retrieval:
+  top_k: 8
+  vector_weight: 0.7
+  min_score: 0.35
+
+session:
+  max_turns: 12
+
+# QQ 桥接（NapCat OneBot11）
+bridge:
+  ws_url: ws://127.0.0.1:3001
+  mode: qa                 # qa | persona
+  persona_person: ""       # persona 模式要模仿的人，如 c2c:10001
+  group_trigger: at        # at | all
+  restrict_group_scope: true
+  rate_limit_per_min: 30
