@@ -1,6 +1,6 @@
-# qq-chat-exporter
+# qq-chatbox
 
-把 Windows 版 **NTQQ** 的本地聊天记录导出为 **JSON** 和 **纯 TXT**。
+把 Windows 版 **NTQQ** 的本地聊天记录导出为 **JSON / 纯 TXT**，支持**媒体下载**与**定时增量导出**。
 
 纯 Python 实现，不需要编译 SQLCipher 扩展。解密密钥通过 **NapCat**（开源的 NTQQ 协议框架）在登录时自动截获，本工具负责「解密 → 解析 → 导出」。
 
@@ -93,7 +93,8 @@ out/
 | `keys` | 从运行中的 QQ 进程内存提取密钥（备用） |
 | `decrypt` | 用 `--key`（32 字节 hex）或 `--passphrase`（16 字符）解密 |
 | `schema` | 打印（明文）数据库的表结构，便于适配新版本 |
-| `export` | 从明文库导出 JSON / TXT |
+| `export` | 从明文库导出 JSON / TXT（可加 `--media` / `--incremental`） |
+| `watch` | 定时增量导出（每 N 秒一轮，自动只导出新消息） |
 | `all` | 取密钥 → 解密 → 导出，一步到位 |
 
 常用参数：
@@ -103,7 +104,39 @@ out/
 * `--names names.json`：会话名称映射，如 `{"group:123456": "项目群", "c2c:10001": "张三"}`；
 * `--limit N`：只导前 N 条（调试用）；
 * `--single-json`：JSON 合并为单文件；
-* `--include-content`：JSON 里附带完整的 Protobuf 字段树（很大）。
+* `--include-content`：JSON 里附带完整的 Protobuf 字段树（很大）；
+* `--media`：下载图片/文件/语音/视频/表情到 `out/media/`；
+* `--incremental`：增量导出（用 `out/.export_state.json` 记录进度）；
+* `--since <消息ID>`：只导出消息 ID 大于该值的消息；
+* `--media-dir <nt_data目录>`：QQ 媒体缓存目录（默认从消息里的本地路径自动推导）。
+
+---
+
+## 媒体下载
+
+`export --media`（或 `watch --media`）会把消息里引用的图片/文件/语音/视频/表情存到
+`out/media/<会话>/`，查找顺序：
+
+1. 消息里记录的本地缓存路径（原图）；
+2. 本地缓存按 **MD5 兜底**（原图被 QQ 清理后，退而求其次拿缩略图）；
+3. HTTP 下载（URL 里的 `rkey` 有时效，旧消息可能已过期）。
+
+> 说明：QQ 会定期清理本地媒体缓存、下载 token 也会过期。对于已被清理的旧媒体，
+> 完整恢复需要 NapCat 的**富媒体 API**（重新换 rkey），这超出了本工具的范围。
+> 日常场景里，近期媒体 + 缩略图基本都能覆盖到。
+
+## 定时 / 增量导出
+
+```powershell
+# 一次性增量：只导出上次之后的新消息
+.\.venv\Scripts\python.exe -m qq_exporter export --db plain.db --incremental
+
+# 定时增量：每 1 小时自动跑一轮，只导出新消息
+.\.venv\Scripts\python.exe -m qq_exporter watch --db plain.db --interval 3600 --media
+```
+
+增量进度记录在 `out/.export_state.json`；删除它即可重新全量导出。
+配合 QQ 持续写入时，每轮只需重新解密一次（密钥已缓存）即可拿到新消息。
 
 ---
 

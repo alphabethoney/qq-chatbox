@@ -5,17 +5,31 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
 from . import __version__, keyfinder, sqlcipher
 from .collect import build_conversations, load_names
-from .exporters import export_json, export_txt
+from .exporters import export_json, export_txt, safe_name
+from .media import download_media
 
 DEFAULT_WORK = Path("_work")
 
 
 def _p(msg: str) -> None:
     print(msg, flush=True)
+
+
+def _load_state(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _save_state(path: Path, state: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 # --------------------------------------------------------------------------
@@ -132,30 +146,94 @@ def cmd_export(args) -> int:
     formats = [f.strip().lower() for f in args.format.split(",") if f.strip()]
     names = load_names(Path(args.names) if args.names else None)
 
+    # 增量：读取状态文件得到每个消息表的起点；--since 可手动覆盖起点
+    min_ids: dict[str, int] = {}
+    state_path = out_dir / ".export_state.json"
+    if args.incremental:
+        state = _load_state(state_path)
+        min_ids = {str(k): int(v) for k, v in state.get("last_ids", {}).items()}
+    if args.since is not None:
+        min_ids = {k: args.since for k in min_ids} or {"*": args.since}
+
     meta, conversations = build_conversations(
         db_path,
         include_content=args.include_content,
         names=names,
         limit=args.limit,
+        min_ids=min_ids,
         progress=_p,
     )
     _p(f"共 {meta['conversation_count']} 个会话 / {meta['message_count']} 条消息")
     if not conversations:
         _p("没有可导出的消息")
-        return 1
+        return 0
+
+    # 媒体下载
+    if args.media:
+        from .media import build_local_index
+
+        # 收集媒体并推导 nt_data 根目录（从消息里的本地路径反推）
+        conv_media = []
+        nt_data_root = args.media_dir
+        for conv in conversations:
+            items = [m for msg in conv.messages for m in msg.get("media", [])]
+            conv_media.append((conv, items))
+            if not nt_data_root:
+                for m in items:
+                    lp = m.get("local_path") or ""
+                    if "nt_data" in lp:
+                        nt_data_root = lp.split("nt_data", 1)[0] + "nt_data"
+                        break
+        if nt_data_root:
+            _p(f"媒体缓存目录: {nt_data_root}")
+            local_index = build_local_index(nt_data_root)
+        else:
+            local_index = {}
+
+        stats = {"copied": 0, "downloaded": 0, "skipped": 0, "failed": 0}
+        for conv, items in conv_media:
+            if not items:
+                continue
+            d = out_dir / "media" / safe_name(conv.title, conv.key)
+            st = download_media(items, d, local_index=local_index)
+            for k in stats:
+                stats[k] += st[k]
+        _p(
+            f"媒体: 复制 {stats['copied']} / 下载 {stats['downloaded']} / "
+            f"跳过 {stats['skipped']} / 失败 {stats['failed']}"
+        )
+
     if "json" in formats:
-        index = export_json(
+        export_json(
             conversations,
             out_dir / "json",
             meta,
             single=args.single_json,
             include_segments=not args.no_segments,
         )
-        _p(f"JSON 已写入 {out_dir / 'json'}（{len(index['conversations'])} 个文件）")
+        _p(f"JSON 已写入 {out_dir / 'json'}")
     if "txt" in formats:
-        index = export_txt(conversations, out_dir / "txt", meta)
-        _p(f"TXT 已写入 {out_dir / 'txt'}（{len(index['conversations'])} 个文件）")
+        export_txt(conversations, out_dir / "txt", meta)
+        _p(f"TXT 已写入 {out_dir / 'txt'}")
+
+    # 更新增量状态
+    if args.incremental:
+        _save_state(state_path, {"last_ids": meta.get("last_ids", {})})
+        _p(f"增量状态已更新: {meta.get('last_ids')}")
     return 0
+
+
+def cmd_watch(args) -> int:
+    args.incremental = True
+    _p(f"定时增量导出：每 {args.interval} 秒一轮，Ctrl+C 退出")
+    while True:
+        try:
+            rc = cmd_export(args)
+        except KeyboardInterrupt:
+            _p("已停止")
+            return 0
+        _p(f"本轮完成（{rc}），等待 {args.interval} 秒…")
+        time.sleep(args.interval)
 
 
 def cmd_all(args) -> int:
@@ -294,7 +372,25 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--include-content", action="store_true", help="JSON 中附带原始字段树")
     p.add_argument("--names", help="会话名称映射 JSON")
     p.add_argument("--limit", type=int, help="只导出前 N 条消息（调试用）")
+    p.add_argument("--media", action="store_true", help="下载图片/文件/语音/视频/表情到 out/media/")
+    p.add_argument("--media-dir", help="QQ 的 nt_data 缓存目录（默认从消息里的路径自动推导）")
+    p.add_argument("--incremental", action="store_true", help="增量导出：只导出上次之后的新消息")
+    p.add_argument("--since", type=int, help="只导出消息ID大于该值的消息")
     p.set_defaults(func=cmd_export)
+
+    p = sub.add_parser("watch", help="定时增量导出")
+    p.add_argument("--db", required=True, help="已解密的 sqlite 文件")
+    p.add_argument("--out", default="out", help="输出目录")
+    p.add_argument("--format", default="json,txt")
+    p.add_argument("--interval", type=int, default=3600, help="间隔秒数（默认 3600）")
+    p.add_argument("--media", action="store_true", help="下载媒体")
+    p.add_argument("--media-dir", help="QQ 的 nt_data 缓存目录")
+    p.add_argument("--names")
+    p.add_argument("--single-json", action="store_true")
+    p.add_argument("--no-segments", action="store_true")
+    p.add_argument("--include-content", action="store_true")
+    p.add_argument("--since", type=int)
+    p.set_defaults(func=cmd_watch)
 
     p = sub.add_parser("all", help="一条龙：取密钥 -> 解密 -> 导出")
     p.add_argument("--qq", help="账号（默认自动检测）")
@@ -312,6 +408,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--include-content", action="store_true")
     p.add_argument("--names")
     p.add_argument("--limit", type=int)
+    p.add_argument("--media", action="store_true", help="下载媒体到 out/media/")
+    p.add_argument("--media-dir", help="QQ 的 nt_data 缓存目录")
+    p.add_argument("--incremental", action="store_true", help="增量导出")
+    p.add_argument("--since", type=int, help="只导出消息ID大于该值的消息")
     p.add_argument("--yes", action="store_true", help="跳过交互确认")
     p.add_argument("--allow-wal", action="store_true", help="忽略 -wal 提示")
     p.set_defaults(func=cmd_all)

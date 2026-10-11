@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Iterator
 
 from . import wire
+from .media import extract_media
 
 # 逻辑字段 -> 候选列名（按优先级）
 FIELD_CANDIDATES: dict[str, tuple[str, ...]] = {
@@ -235,10 +236,17 @@ def iter_messages(
     columns: dict[str, str],
     *,
     include_content: bool = False,
+    min_id: int | None = None,
 ) -> Iterator[dict]:
     names = list(columns.values())
     select = ", ".join(f'"{c}"' for c in names)
-    cur = conn.execute(f'SELECT {select} FROM "{table}" ORDER BY rowid')
+    sql = f'SELECT {select} FROM "{table}"'
+    params: tuple = ()
+    if min_id is not None and columns.get("msg_id"):
+        sql += f' WHERE "{columns["msg_id"]}" > ?'
+        params = (min_id,)
+    sql += " ORDER BY rowid"
+    cur = conn.execute(sql, params)
     for row in cur:
         data = dict(zip(columns.keys(), row))
         blob = data.get("body")
@@ -261,6 +269,10 @@ def iter_messages(
         }
         if segments:
             msg["segments"] = segments
+        if blob:
+            media = extract_media(blob)
+            if media:
+                msg["media"] = media
         if include_content and blob:
             try:
                 msg["raw"] = wire.to_dict(blob, max_depth=4)

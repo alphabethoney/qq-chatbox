@@ -1,7 +1,7 @@
 [project]
-name = "qq-chat-exporter"
-version = "1.0.0"
-description = "从 Windows NTQQ 本地数据库中导出聊天记录（JSON / 纯 TXT）"
+name = "qq-chatbox"
+version = "1.1.0"
+description = "NTQQ 聊天记录导出（JSON/TXT）+ 媒体下载 + 定时增量导出"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }

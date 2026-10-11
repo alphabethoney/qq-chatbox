@@ -33,10 +33,15 @@ def build_conversations(
     include_content: bool = False,
     names: dict[str, str] | None = None,
     limit: int | None = None,
+    min_ids: dict[str, int] | None = None,
     progress=None,
 ) -> tuple[dict, list[Conversation]]:
-    """读取数据库并返回 ``(元信息, 会话列表)``。"""
+    """读取数据库并返回 ``(元信息, 会话列表)``。
+
+    ``min_ids`` 用于增量导出：只读取 ``{表名: 最小消息ID}`` 中大于该 ID 的消息。
+    """
     names = names or {}
+    min_ids = min_ids or {}
     conn = dbmod.connect(db_path)
     try:
         tables = dbmod.detect_message_tables(conn)
@@ -45,18 +50,28 @@ def build_conversations(
 
         buckets: "OrderedDict[str, Conversation]" = OrderedDict()
         total = 0
+        max_ids: dict[str, int] = {}
         for table, kind in tables:
             columns = dbmod.resolve_columns(conn, table)
             if progress:
                 progress(f"读取 {table}（{kind}）…")
+            table_max = min_ids.get(table, 0) or 0
             for msg in dbmod.iter_messages(
-                conn, table, kind, columns, include_content=include_content
+                conn,
+                table,
+                kind,
+                columns,
+                include_content=include_content,
+                min_id=min_ids.get(table),
             ):
                 _key, conv = _bucket_for(buckets, kind, msg)
                 conv.messages.append(msg)
                 total += 1
+                if msg.get("msg_id") is not None:
+                    table_max = max(table_max, msg["msg_id"])
                 if limit and total >= limit:
                     break
+            max_ids[table] = table_max
             if limit and total >= limit:
                 break
     finally:
@@ -73,6 +88,7 @@ def build_conversations(
         "source_db": str(db_path),
         "conversation_count": len(buckets),
         "message_count": total,
+        "last_ids": max_ids,
     }
     return meta, list(buckets.values())
 
