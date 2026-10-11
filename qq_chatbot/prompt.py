@@ -44,7 +44,7 @@ def build_qa_messages(
 
 
 def _persona_system(profile: PersonaProfile) -> str:
-    name = profile.speaker.rsplit(":", 1)[-1] if ":" in profile.speaker else profile.speaker
+    name = profile.name or (profile.speaker.rsplit(":", 1)[-1] if ":" in profile.speaker else profile.speaker)
     facts = "；".join(f"{f.get('topic', '')}: {f.get('fact', '')}" for f in profile.facts) or "（无）"
     opinions = "；".join(f"{o.get('topic', '')}: {o.get('opinion', '')}" for o in profile.opinions) or "（无）"
     rels = "；".join(f"{r.get('person', '')} → {r.get('relation', '')}" for r in profile.relationships) or "（无）"

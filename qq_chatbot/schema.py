@@ -61,6 +61,7 @@ class RetrievedTurn:
 @dataclass
 class PersonaProfile:
     speaker: str
+    name: str = ""                                        # 自称/昵称（空则回退到 speaker 的 QQ 号）
     style: dict = field(default_factory=dict)            # tone/catchphrases/emojis/avg_sentence_len
     facts: list[dict] = field(default_factory=list)      # {topic, fact, evidence}
     opinions: list[dict] = field(default_factory=list)

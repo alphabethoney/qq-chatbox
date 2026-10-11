@@ -72,6 +72,8 @@ class Chatbot:
             profile = build_profile(self.corpus, person, self.llm, kind=kind)
             self.profiles[cache_key] = profile
         profile = profile or PersonaProfile(speaker=person)
+        if self.config.bridge.persona_name:
+            profile.name = self.config.bridge.persona_name
         msgs = build_persona_messages(query, retrieved, profile, history)
         text = self.llm.chat(msgs, temperature=temp, max_tokens=max_tokens)
         return Answer(text, [self._cite(rt) for rt in retrieved[:5]], grounded=True)
