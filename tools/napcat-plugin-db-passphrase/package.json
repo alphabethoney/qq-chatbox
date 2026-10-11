@@ -1,0 +1,7 @@
+{
+  "name": "db-passphrase",
+  "version": "1.0.0",
+  "main": "index.mjs",
+  "description": "登录后打印并保存 NTQQ 数据库口令（16 字符 ASCII），供 qq-chat-exporter 使用",
+  "author": "qq-chat-exporter"
+}

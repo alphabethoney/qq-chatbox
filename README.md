@@ -256,6 +256,26 @@ pip install websocket-client
 
 > persona 是「模仿口吻」，不是登录对方账号；冒充他人账号违反 QQ 协议，请用机器人账号承载。
 
+### 获取数据库口令（NapCat 插件）
+
+导出聊天记录需要数据库口令。内置了一个 NapCat 小插件，登录后自动打印并保存该口令：
+
+```powershell
+# 安装（把插件目录复制到 NapCat 插件目录）
+robocopy tools\napcat-plugin-db-passphrase "D:\NapCat\napcat\plugins\db-passphrase" /E
+# 启动 NapCat，用「导出账号」扫码登录 → 控制台打印
+#   [db-passphrase] 数据库口令 passphrase = XXXXXXXXXXXXXXXX
+# 也会保存到 plugins\db-passphrase\passphrase.json
+```
+
+拿到口令后解密导出：
+
+```powershell
+.\.venv\Scripts\python.exe -m qq_exporter all --qq <导出账号> --passphrase "<16字符口令>" --out out
+```
+
+> **导出账号 ≠ 机器人账号**：口令是「账号固定」的，只需在导出账号登录时抓一次；之后 NapCat 可切换/重登成机器人账号跑 `qq`。两阶段互不影响。
+
 ---
 
 ## 风险与合规
