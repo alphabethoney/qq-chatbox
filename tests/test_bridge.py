@@ -67,6 +67,19 @@ def private_event(raw: str, user_id=10001) -> dict:
     }
 
 
+def group_event_array(text: str, user_id=10003, group_id=123456) -> dict:
+    """NapCat messagePostFormat=array 的群聊事件。"""
+    return {
+        "post_type": "message", "message_type": "group", "sub_type": "normal",
+        "user_id": user_id, "group_id": group_id, "self_id": SELF,
+        "message": [
+            {"type": "at", "data": {"qq": str(SELF)}},
+            {"type": "text", "data": {"text": " " + text}},
+        ],
+        "raw_message": f"[CQ:at,qq={SELF}] {text}",
+    }
+
+
 def only_action(out):
     return out[0].action if out else None
 
@@ -85,6 +98,10 @@ def main() -> int:
 
         out = rt.handle(group_event("没 @ 我"), self_id=SELF)
         check("群聊未 @ 不触发", out == [], str(out))
+
+        out = rt.handle(group_event_array("会议改到几点"), self_id=SELF)
+        check("array 格式 @ 触发", only_action(out) == "send_group_msg", str(out))
+        check("array 格式提取文本并回复", out and out[0].params["message"].startswith("[qa]"), str(out))
 
         out = rt.handle(private_event("周末一起吃饭"), self_id=SELF)
         check("私聊直接回复", only_action(out) == "send_private_msg", str(out))

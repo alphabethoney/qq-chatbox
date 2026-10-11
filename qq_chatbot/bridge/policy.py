@@ -17,6 +17,34 @@ from ..session import Session
 _AT = re.compile(r"\[CQ:at,qq=\d+\]")
 
 
+def _text_of(event: dict) -> str:
+    """从事件里取出纯文本，兼容 array / string 两种 messagePostFormat。"""
+    msg = event.get("message")
+    if isinstance(msg, list):
+        parts = []
+        for seg in msg:
+            if isinstance(seg, dict) and seg.get("type") == "text":
+                parts.append((seg.get("data") or {}).get("text", ""))
+        return "".join(parts)
+    if isinstance(msg, str):
+        return _AT.sub("", msg).strip()
+    return _AT.sub("", str(event.get("raw_message") or "")).strip()
+
+
+def _at_self(event: dict, self_id: int) -> bool:
+    """判断是否 @ 了机器人（array 格式看 at 段，string 格式看 CQ 码）。"""
+    if not self_id:
+        return False
+    msg = event.get("message")
+    if isinstance(msg, list):
+        return any(
+            isinstance(s, dict) and s.get("type") == "at"
+            and str((s.get("data") or {}).get("qq", "")) == str(self_id)
+            for s in msg
+        )
+    return f"[CQ:at,qq={self_id}]" in str(event.get("raw_message") or "")
+
+
 @dataclass
 class Outbound:
     action: str
@@ -43,9 +71,6 @@ class BridgeRuntime:
             return []
         msg_type = event.get("message_type")
         user_id = event.get("user_id")
-        raw = (event.get("raw_message") or "").strip()
-        if not raw:
-            return []
 
         sid = self.cfg.self_id or self_id
         if sid and user_id == sid:
@@ -54,15 +79,17 @@ class BridgeRuntime:
         group_id = None
         if msg_type == "group":
             group_id = event.get("group_id")
-            if not self._should_reply_group(raw, sid):
+            if not self._should_reply_group(event, sid):
                 return []
             key = f"group:{group_id}"
-            text = _AT.sub("", raw).strip()
+            text = _text_of(event)
             if not text:
                 text = "你好"
         elif msg_type == "private":
+            text = _text_of(event)
+            if not text:
+                return []
             key = f"private:{user_id}"
-            text = raw
         else:
             return []
 
@@ -95,12 +122,10 @@ class BridgeRuntime:
 
     # ---- 内部 -------------------------------------------------------------
 
-    def _should_reply_group(self, raw: str, self_id: int) -> bool:
+    def _should_reply_group(self, event: dict, self_id: int) -> bool:
         if self.cfg.group_trigger == "all":
             return True
-        if not self_id:
-            return False  # 未知机器人号时，@ 判定不可靠
-        return f"[CQ:at,qq={self_id}]" in raw
+        return _at_self(event, self_id)
 
     @staticmethod
     def _parse_command(text: str) -> list[str] | None:
