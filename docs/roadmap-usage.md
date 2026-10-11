@@ -28,7 +28,15 @@ python tools/sync_index.py --live-db "<一致快照中的nt_msg.db>" --passphras
 python tools/sync_index.py --live-db "<一致快照中的nt_msg.db>" --passphrase-file "<口令文件>" --base-json out/json --work _work/sync --out .chatbot --config chatbot.yaml --full
 ```
 
-当前仍全量解密主库、合并累计数据和重建索引。`--since` 只减少消息读取/导出范围，不减少加密主库解密量；需预留明文库、累计快照和新索引空间。同步跳过 WAL，不能保证看到尚未写入主库的消息。失败不推进本地水位线；若使用可选 `--push --host <SSH目标>`，远端传输/重启需独立检查。
+需要避免每轮全量解密时，显式添加持久缓存目录：
+
+```powershell
+python tools/sync_index.py --live-db "<一致快照中的nt_msg.db>" --passphrase-file "<口令文件>" --base-json out/json --work _work/sync --out .chatbot --decrypt-cache _work/decrypt-cache --config chatbot.yaml
+```
+
+首次建立全量明文基线，后续扫描页指纹，只解密变化页。`--rebuild-decrypt-cache` 强制重建缓存；`--full` 仍只控制消息导出。若已有累计历史缺少源身份，默认拒绝自动迁移并保留旧记录；确认同来源后加 `--adopt-existing-history` 保留历史并全量读取一次。缓存目录需保留，不能随临时工作目录一起清理；详情与恢复协议见 [差分页解密缓存](<incremental-decryption.md>)。
+
+未加缓存参数时仍每轮全量解密；启用缓存后仍需全库读取、哈希和一致性检查。累计合并和索引重建仍是全量操作；需预留明文缓存、页恢复记录、累计快照和新索引空间。同步跳过 WAL，不能保证看到尚未写入主库的消息。失败不推进本地水位线；若使用可选 `--push --host <SSH目标>`，只传索引，不传明文缓存，远端传输/重启需独立检查。
 
 ## R2：语义向量与可选 hash 回退
 

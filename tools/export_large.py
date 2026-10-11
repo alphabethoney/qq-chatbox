@@ -203,6 +203,7 @@ def main() -> int:
     ap.add_argument("--names", default=None)
     ap.add_argument("--since", type=_since_value, help="仅导出晚于此 Unix 秒时间戳的消息（SQL 过滤）")
     ap.add_argument("--strict", action="store_true", help="任何读取失败即终止，不允许坏页导出提交同步水位线")
+    ap.add_argument("--immutable", action="store_true", help="仅用于稳定离线快照：不创建 SQLite sidecar、不读取 WAL")
     ap.add_argument("--resume", action="store_true", help="启用/恢复会话checkpoint；仍扫描全部匹配消息，仅跳过有效会话序列化与写盘")
     args = ap.parse_args()
     formats = sorted(set(part.strip() for part in args.format.split(",") if part.strip()))
@@ -223,7 +224,8 @@ def main() -> int:
     source = None
     if args.resume:
         source = _source_fingerprint(dbp)
-        parameters = {"formats": formats, "since": args.since, "strict": args.strict, "names": names_fingerprint}
+        parameters = {"formats": formats, "since": args.since, "strict": args.strict,
+                      "names": names_fingerprint, "immutable": args.immutable}
         if checkpoint_path.exists():
             checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
             if checkpoint.get("version") != 1 or checkpoint.get("source") != source:
@@ -237,7 +239,8 @@ def main() -> int:
         out.mkdir(parents=True, exist_ok=True)
         checkpoint["complete"] = False
         _save_checkpoint(checkpoint_path, checkpoint)
-    conn = sqlite3.connect(f"file:{dbp.as_posix()}?mode=ro", uri=True)
+    uri = dbp.as_uri() + "?mode=ro" + ("&immutable=1" if args.immutable else "")
+    conn = sqlite3.connect(uri, uri=True)
     conn.row_factory = sqlite3.Row
 
     try:

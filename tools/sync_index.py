@@ -1,11 +1,12 @@
 """定时同步：把导出账号的新消息增量并入机器人索引，并推送到主机。
 
 流程（每步可独立跑）：
-    全量解密当前库 → SQL 增量严格导出 → 与持久累计/base 合并去重 → 暂存重建索引 → 提交水位线
+    全量或缓存差分页解密 → SQL 增量严格导出 → 与持久累计/base 合并去重 → 暂存重建索引 → 提交水位线
 
 水位线存入 --out/manifest.json 的 sync，累计导出存入 --out/.sync。
-默认重读最近 300 秒，--full 可补窗口外迟到记录；解密仍需完整明文库磁盘空间，
-累计合并和索引重建也仍是全量操作。时间列没有索引时 SQLite 仍可能全表扫描。
+默认重读最近 300 秒，--full 可补窗口外迟到记录；--decrypt-cache 可复用未变页面，
+但仍需完整明文库磁盘空间，累计合并和索引重建也仍是全量操作。
+时间列没有索引时 SQLite 仍可能全表扫描。
 
 用法:
     python tools/sync_index.py --passphrase <16字符口令> --person <QQ号> \
@@ -56,10 +57,13 @@ def decrypt(live_db: Path, plain_db: Path, *, key: str = "", passphrase: str = "
         raise RuntimeError("quick_check 未通过，拒绝推进同步状态")
 
 
-def export_fault_tolerant(plain_db: Path, out_dir: Path, *, since: float | None = None) -> None:
+def export_fault_tolerant(plain_db: Path, out_dir: Path, *, since: float | None = None,
+                          immutable: bool = False) -> None:
     """Compatibility name; sync always requests a complete, strict export."""
     cmd = [sys.executable, str(ROOT / "tools/export_large.py"),
            "--db", str(plain_db), "--out", str(out_dir), "--format", "json", "--strict"]
+    if immutable:
+        cmd += ["--immutable"]
     if since is not None:
         cmd += ["--since", str(since)]
     _run(cmd)
@@ -222,17 +226,26 @@ def _publish(stage: Path, out: Path) -> None:
 def sync(*, live_db: Path, base_json: Path, work: Path, out: Path,
          person: str = "", key: str = "", passphrase: str = "",
          overlap_seconds: int = 300, full: bool = False, host: str | None = None,
-         build_config: Path | None = None) -> dict:
+         build_config: Path | None = None, decrypt_cache: Path | None = None,
+         rebuild_decrypt_cache: bool = False, adopt_existing_history: bool = False) -> dict:
     """Commit manifest.sync only after complete export, cumulative merge and build.
 
     State timestamps use Unix seconds. --full repairs arrivals older than the
-    bounded overlap. Plaintext decryption and index rebuild remain full-sized.
-    Source/base/person/overlap changes force a full read. Changing source paths
-    starts a new lineage; old-account messages must not leak into the new one.
+    bounded overlap; it does not force cache decryption. Plaintext storage and
+    index rebuild remain full-sized. Source/base/person/overlap changes force
+    a full read. A changed source identity starts a new lineage and preserves
+    the old generation for recovery. Unknown legacy identity requires explicit
+    adopt_existing_history before it can be retained with a cached source.
     """
+    if (rebuild_decrypt_cache or adopt_existing_history) and decrypt_cache is None:
+        raise ValueError("rebuild_decrypt_cache / adopt_existing_history 需要 decrypt_cache")
     if overlap_seconds < 1:
         raise ValueError("overlap_seconds 必须至少为 1，确保同秒消息不遗漏")
     live_db, base_json, work, out = (Path(p).resolve() for p in (live_db, base_json, work, out))
+    if decrypt_cache is not None:
+        decrypt_cache = Path(decrypt_cache).resolve()
+        if decrypt_cache == out or decrypt_cache.is_relative_to(out):
+            raise ValueError("decrypt_cache 必须位于索引输出目录之外")
     work.mkdir(parents=True, exist_ok=True)
     out.mkdir(parents=True, exist_ok=True)
     state_dir = out / ".sync"
@@ -254,7 +267,9 @@ def sync(*, live_db: Path, base_json: Path, work: Path, out: Path,
             return _sync_locked(live_db=live_db, base_json=base_json, work=work, out=out,
                                 person=person, key=key, passphrase=passphrase,
                                 overlap_seconds=overlap_seconds, full=full, host=host,
-                                build_config=Path(build_config).resolve() if build_config is not None else None)
+                                build_config=Path(build_config).resolve() if build_config is not None else None,
+                                decrypt_cache=decrypt_cache, rebuild_decrypt_cache=rebuild_decrypt_cache,
+                                adopt_existing_history=adopt_existing_history)
         finally:
             lock.seek(0)
             if os.name == "nt":
@@ -264,7 +279,8 @@ def sync(*, live_db: Path, base_json: Path, work: Path, out: Path,
 
 
 def _sync_locked(*, live_db, base_json, work, out, person, key, passphrase,
-                 overlap_seconds, full, host, build_config):
+                 overlap_seconds, full, host, build_config, decrypt_cache, rebuild_decrypt_cache,
+                 adopt_existing_history):
     manifest_path = out / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}
     previous = manifest.get("sync")
@@ -293,16 +309,48 @@ def _sync_locked(*, live_db, base_json, work, out, person, key, passphrase,
             archive, last = None, None
     compatible = previous is not None and previous["config"] == config
     since = last - overlap_seconds if compatible and not full and last is not None else None
-    print(f"同步模式: {'全量' if since is None else '增量'} since={since}", flush=True)
+    source_identity = None
     generation = out / ".sync" / f"data-{uuid.uuid4().hex}"
     committed = False
     try:
         with tempfile.TemporaryDirectory(prefix="run-", dir=work, ignore_cleanup_errors=True) as temporary:
             run = Path(temporary)
-            plain_db = run / "plain" / "nt_msg.db"
-            plain_db.parent.mkdir()
-            decrypt(live_db, plain_db, key=key, passphrase=passphrase)
-            export_fault_tolerant(plain_db, run / "live", since=since)
+            if decrypt_cache is None:
+                plain_db = run / "plain" / "nt_msg.db"
+                plain_db.parent.mkdir()
+                decrypt(live_db, plain_db, key=key, passphrase=passphrase)
+                print(f"同步模式: {'全量' if since is None else '增量'} since={since}", flush=True)
+                export_fault_tolerant(plain_db, run / "live", since=since)
+            else:
+                from qq_exporter import sqlcipher
+                from qq_exporter.decrypt_cache import open_decrypted_cache
+
+                enc_key = bytes.fromhex(key) if key else sqlcipher.key_from_passphrase(live_db, passphrase)
+                with open_decrypted_cache(live_db, decrypt_cache, enc_key,
+                                          force_rebuild=rebuild_decrypt_cache) as (plain_db, stats):
+                    source_identity = stats.get("source_identity")
+                    if not isinstance(source_identity, str) or not source_identity:
+                        raise ValueError("解密缓存缺少源身份，拒绝推进同步状态")
+                    prior_identity = None
+                    if archive is not None:
+                        identity_path = archive / "source-identity.json"
+                        if identity_path.exists():
+                            prior_identity = json.loads(identity_path.read_text(encoding="utf-8")).get("source_identity")
+                        if prior_identity is None:
+                            if not adopt_existing_history:
+                                raise ValueError("已有累计历史缺少源身份；请使用新 --out，或确认同源后指定 --adopt-existing-history")
+                            since = None
+                        elif source_identity != prior_identity:
+                            # Compare to the message commit, not the last cache
+                            # update: build failure may leave a refreshed cache.
+                            # Preserve the old generation for explicit recovery.
+                            archive, last, since = None, None, None
+                            print("源身份变化：全量导出并开启新的累计快照；旧快照保留供恢复", flush=True)
+                    print(f"解密缓存: 总页={stats['pages']} 解密={stats['decrypted_pages']} "
+                          f"复用={stats['reused_pages']}", flush=True)
+                    print(f"同步模式: {'全量' if since is None else '增量'} since={since}", flush=True)
+                    export_fault_tolerant(plain_db, run / "live", since=since, immutable=True)
+            # Cache lock is released before cumulative merging and index build.
             live_json = run / "live" / "json"
             live_index = json.loads((live_json / "index.json").read_text(encoding="utf-8"))
             report = live_index.get("export", {})
@@ -328,6 +376,9 @@ def _sync_locked(*, live_db, base_json, work, out, person, key, passphrase,
                 build(person, run / "merged", stage, config=build_config)
             built_manifest = json.loads((stage / "manifest.json").read_text(encoding="utf-8"))
             shutil.copytree(run / "merged", generation)
+            if source_identity is not None:
+                (generation / "source-identity.json").write_text(
+                    json.dumps({"source_identity": source_identity}), encoding="utf-8")
             for path in generation.iterdir():
                 with path.open("r+b") as fh:
                     os.fsync(fh.fileno())
@@ -377,7 +428,12 @@ def main() -> int:
     ap.add_argument("--overlap-seconds", type=int, default=300, help="重读窗口秒数（至少 1，默认 300）")
     ap.add_argument("--config", type=Path, help="透传给索引 build 的配置文件（含 embedding 配置）")
     ap.add_argument("--full", action="store_true", help="强制全量读取，补回窗口外迟到消息")
+    ap.add_argument("--decrypt-cache", type=Path, help="持久差分页解密缓存目录（含明文，须在索引目录之外）")
+    ap.add_argument("--rebuild-decrypt-cache", action="store_true", help="强制重建解密缓存，需要 --decrypt-cache")
+    ap.add_argument("--adopt-existing-history", action="store_true", help="确认现有无源身份的累计历史与当前源同属一个账号，保留并全量合并；需要 --decrypt-cache")
     args = ap.parse_args()
+    if (args.rebuild_decrypt_cache or args.adopt_existing_history) and args.decrypt_cache is None:
+        ap.error("--rebuild-decrypt-cache / --adopt-existing-history 需要 --decrypt-cache")
     if args.overlap_seconds < 1:
         ap.error("--overlap-seconds 必须至少为 1")
     if args.push and not args.host:
@@ -397,7 +453,9 @@ def main() -> int:
         sync(live_db=Path(args.live_db), base_json=Path(args.base_json), work=Path(args.work),
              out=Path(args.out), person=args.person, key=args.key or "", passphrase=passphrase or "",
              overlap_seconds=args.overlap_seconds, full=args.full,
-             host=args.host if args.push else None, build_config=args.config)
+             host=args.host if args.push else None, build_config=args.config,
+             decrypt_cache=args.decrypt_cache, rebuild_decrypt_cache=args.rebuild_decrypt_cache,
+             adopt_existing_history=args.adopt_existing_history)
     except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
         print(f"同步失败（未提交新水位线）: {exc}", file=sys.stderr, flush=True)
         return 1
