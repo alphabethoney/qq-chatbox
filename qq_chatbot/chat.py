@@ -145,10 +145,11 @@ def load_chatbot(config: Config) -> Chatbot:
     llm = make_llm(config.llm)
     retriever = HybridRetriever(store, embed, config.retrieval)
     corpus = Corpus(speakers=speakers, turns=store.turns, meta=meta)
-    # 发送前脱敏：把语料里的真实昵称/QQ号/手机/邮箱替换成占位符，回复后再还原昵称
+    # 发送前脱敏：把语料里的真实昵称/群名/QQ号/手机/邮箱替换成占位符，回复后再还原昵称
     if config.llm.redact:
         from .redact import Redactor, RedactingLLM
         names = [s.name for s in corpus.speakers.values()]
+        names.extend(meta.get("conversation_titles", []))
         if config.bridge.persona_name:
             names.append(config.bridge.persona_name)
         llm = RedactingLLM(llm, Redactor(names))

@@ -51,6 +51,10 @@ def load_corpus(
     speakers = {t.speaker.key: t.speaker for t in turns}
     meta = dict(meta)
     meta.update({"source": source, "turn_count": len(turns), "speaker_count": len(speakers)})
+    # 会话标题（群名/私聊昵称）——发送前脱敏的名单来源之一
+    titles = sorted({str(c.get("title")) for c in convs if c.get("title")})
+    if titles:
+        meta["conversation_titles"] = titles
     if progress:
         progress(f"语料就绪：{len(turns)} 轮 / {len(speakers)} 个说话人")
     return Corpus(speakers=speakers, turns=turns, meta=meta)
