@@ -206,6 +206,15 @@ class BridgeRuntime:
                 return reply("（尚无出处）")
             lines = [f"· {c.conversation_key} {c.time_str} {c.speaker}: {c.text}" for c in cites]
             return reply("上一条出处：\n" + "\n".join(lines))
+        if cmd in ("search", "检索"):
+            if len(parts) < 2:
+                return reply("用法：/search <查询词>")
+            q = " ".join(parts[1:])
+            results = self.bot.retriever.retrieve(q, top_k=5)
+            if not results:
+                return reply("没有检索到相关记录")
+            lines = [f"[{r.score:.2f}] {r.turn.speaker.name} {r.turn.time_str}: {r.turn.text[:36]}" for r in results]
+            return reply("检索命中：\n" + "\n".join(lines))
         if cmd in ("help", "帮助"):
-            return reply("命令：/qa 历史问答 · /persona <key> 数字分身 · /kind c2c|group|auto 切人格 · /cite 出处 · /help")
+            return reply("命令：/qa 历史问答 · /persona <key> 数字分身 · /kind c2c|group|auto 切人格 · /cite 出处 · /search 检索 · /help")
         return reply(f"未知命令：{cmd}（/help 查看）")

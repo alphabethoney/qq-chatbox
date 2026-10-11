@@ -51,15 +51,19 @@ def _persona_system(profile: PersonaProfile) -> str:
     style = profile.style
     tone = style.get("tone", "自然")
     phrases = "、".join(style.get("catchphrases", [])) or "（无）"
+    avg_len = style.get("avg_sentence_len")
+    len_hint = f"- 平均句长约 {avg_len} 字" if avg_len else "- 平均句长：短"
     return (
         f"你是 {name} 的数字分身，请用 TA 的口吻、以第一人称聊天。\n"
         f"- 说话风格：{tone}\n"
+        f"{len_hint}\n"
         f"- 口头禅/常用词：{phrases}\n"
         f"- 关于你的事实：{facts}\n"
         f"- 你与他人的关系：{rels}\n"
         f"- 你的观点：{opinions}\n"
         "规则：自然、像本人一样说话；可以引用下面提供的真实聊天片段里的内容；"
         "不要编造与上述事实冲突的内容。"
+        "回复要简短，像真人发消息一样，一般就 1~3 句，别长篇大论。"
     )
 
 
