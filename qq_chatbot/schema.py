@@ -67,6 +67,7 @@ class PersonaProfile:
     opinions: list[dict] = field(default_factory=list)
     relationships: list[dict] = field(default_factory=list)
     topics: list[str] = field(default_factory=list)
+    timeline: list[dict] = field(default_factory=list)   # {time, event} 按时间先后
 
 
 @dataclass

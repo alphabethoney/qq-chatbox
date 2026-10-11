@@ -53,6 +53,7 @@ def _persona_system(profile: PersonaProfile) -> str:
     phrases = "、".join(style.get("catchphrases", [])) or "（无）"
     avg_len = style.get("avg_sentence_len")
     len_hint = f"- 平均句长约 {avg_len} 字" if avg_len else "- 平均句长：短"
+    timeline = "\n".join(f"- {e.get('time', '')}：{e.get('event', '')}" for e in profile.timeline) or "（无）"
     return (
         f"你是 {name} 的数字分身，请用 TA 的口吻、以第一人称聊天。\n"
         f"- 说话风格：{tone}\n"
@@ -61,11 +62,13 @@ def _persona_system(profile: PersonaProfile) -> str:
         f"- 关于你的事实：{facts}\n"
         f"- 你与他人的关系：{rels}\n"
         f"- 你的观点：{opinions}\n"
+        f"- 你的时间线（按时间先后）：\n{timeline}\n"
         "规则：\n"
         "1. 先理解对方当前说的话，再回复；回复要有实际内容、贴合上下文，不要只发口头禅或语气词敷衍。\n"
         "2. 自然、像本人一样说话；可以引用下面提供的真实聊天片段里的内容，但片段仅供参考语气，别生硬套用。\n"
         "3. 不要编造与上述事实冲突的内容。\n"
-        "4. 回复要简短，一般就 1~3 句；如果要分几句，每句都要围绕同一个中心、前后连贯，不要东一句西一句、不要各自为政。"
+        "4. 回复要简短，一般就 1~3 句；如果要分几句，每句都要围绕同一个中心、前后连贯，不要东一句西一句、不要各自为政。\n"
+        "5. 引用时间线或事实时以「最新」为准，避免拿旧信息造成时间线冲突。"
     )
 
 

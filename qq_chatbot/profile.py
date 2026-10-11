@@ -34,11 +34,10 @@ def build_profile(
 ) -> PersonaProfile:
     # 用 QQ 号匹配这个人（跨私聊 + 群聊），并按 kind 细分（c2c=私聊人格 / group=群聊人格）
     qq = speaker_qq(speaker_key)
-    turns = [t for t in corpus.turns if speaker_qq(t.speaker.key) == qq]
-    if kind is not None:
-        turns = [t for t in turns if t.kind == kind]
+    all_turns = [t for t in corpus.turns if speaker_qq(t.speaker.key) == qq]
+    turns = [t for t in all_turns if t.kind == kind] if kind is not None else all_turns
     profile = PersonaProfile(speaker=speaker_key)
-    if not turns:
+    if not all_turns:
         return profile
 
     texts = [t.text for t in turns]
@@ -46,6 +45,14 @@ def build_profile(
     profile.topics = _top_topics(texts)
 
     if llm is not None and getattr(llm, "name", "") not in ("mock", ""):
+        # 完整时间线：跨私聊 + 群聊，按时间先后抽取关键事件
+        try:
+            if progress:
+                progress(f"LLM 提炼时间线（{speaker_key}，{len(all_turns)} 轮）…")
+            profile.timeline = _llm_timeline(llm, speaker_key, all_turns)
+        except Exception as exc:  # noqa: BLE001
+            if progress:
+                progress(f"时间线提炼跳过（LLM 失败）：{exc}")
         try:
             if progress:
                 progress(f"LLM 提炼人格档案（{speaker_key}，采样 {min(len(texts), sample)} 轮）…")
@@ -125,6 +132,49 @@ def _parse_json(raw: str) -> dict | None:
         return None
 
 
+_TIMELINE_PROMPT = """你是一名文本分析师。下面是从某个人聊天记录里按时间抽样得到的片段（每条前面带时间戳）。\
+请提炼这个人的「时间线」：关键事件、状态/身份变化、重要节点，按时间先后排列。\
+只输出一个 JSON 对象，不要输出其他文字，结构如下：
+{{"timeline": [{{"time": "YYYY-MM", "event": "一句话概括"}}]}}
+规则：time 用 YYYY-MM 格式；event 简洁、只写能确定的事实；最多 20 条。
+
+样本：
+{corpus}
+"""
+
+
+def _sample_for_timeline(turns, buckets: int = 20, per_bucket: int = 6):
+    """按时间均匀分桶抽样，保证时间线覆盖整个时间范围。"""
+    turns = sorted(turns, key=lambda t: t.time)
+    if len(turns) <= buckets * per_bucket:
+        return turns
+    step = len(turns) / buckets
+    sampled: list = []
+    for i in range(buckets):
+        chunk = turns[int(i * step) : int((i + 1) * step)]
+        if not chunk:
+            continue
+        if len(chunk) <= per_bucket:
+            sampled.extend(chunk)
+        else:
+            for j in range(per_bucket):
+                idx = int(j * (len(chunk) - 1) / (per_bucket - 1))
+                sampled.append(chunk[idx])
+    return sampled
+
+
+def _llm_timeline(llm, speaker_key: str, turns) -> list[dict]:
+    sampled = _sample_for_timeline(turns)
+    corpus = "\n".join(f"- [{t.time_str}] {t.text[:60]}" for t in sampled)
+    messages = [
+        {"role": "system", "content": "你只输出合法 JSON。"},
+        {"role": "user", "content": _TIMELINE_PROMPT.format(corpus=corpus)},
+    ]
+    raw = llm.chat(messages, temperature=0.2, max_tokens=1200)
+    data = _parse_json(raw)
+    return (data or {}).get("timeline") or []
+
+
 # ---------------------------------------------------------------------------
 # 持久化
 # ---------------------------------------------------------------------------
@@ -151,6 +201,7 @@ def save_profile(store_dir: Path, profile: PersonaProfile) -> Path:
                 "opinions": profile.opinions,
                 "relationships": profile.relationships,
                 "topics": profile.topics,
+                "timeline": profile.timeline,
             },
             ensure_ascii=False,
             indent=2,
@@ -175,6 +226,7 @@ def load_profiles(store_dir: Path) -> dict[str, PersonaProfile]:
                 opinions=data.get("opinions", []),
                 relationships=data.get("relationships", []),
                 topics=data.get("topics", []),
+                timeline=data.get("timeline", []),
             )
         except (json.JSONDecodeError, KeyError):
             continue
