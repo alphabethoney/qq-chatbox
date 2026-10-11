@@ -1,14 +1,21 @@
-# 主机运行时配置（当前为「冒烟测试」默认：mock LLM + hash 向量，零外部依赖）。
-# 要真实回复，把 llm / embedding 改成 ollama 或 openai，见 chatbot.yaml.example。
+# 主机运行时配置：云端 API（LLM 生成）+ 本机 hash（向量化）。
+# API key 不要写在这个文件里——用环境变量 QQ_CHATBOT_API_KEY（systemd 从 .env 加载），
+# 或直接设 OPENAI_API_KEY。见 deploy/README.md。
 
 llm:
-  provider: mock          # 改成 ollama / openai
-  model: ""
-  base_url: ""
-  api_key: ""
+  provider: openai          # OpenAI 兼容端点
+  # —— 选一个云端，取消注释；默认 DeepSeek ——
+  model: deepseek-chat
+  base_url: https://api.deepseek.com/v1
+  # 通义千问（DashScope 兼容模式）：
+  # model: qwen-plus
+  # base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+  # 其他 OpenAI 兼容：
+  # base_url: https://api.openai.com/v1
+  api_key: ""               # 留空，走环境变量 QQ_CHATBOT_API_KEY / OPENAI_API_KEY
 
 embedding:
-  provider: hash          # 与读取机 build 时保持一致
+  provider: hash            # 本机 hash：零依赖、离线、与读取机 build 时一致
   dim: 256
 
 store:

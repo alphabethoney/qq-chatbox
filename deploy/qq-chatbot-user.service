@@ -9,6 +9,8 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=%h/qq-chatbot
+# API key 等敏感信息放在 %h/qq-chatbot/.env，不提交到仓库
+EnvironmentFile=-%h/qq-chatbot/.env
 ExecStart=/usr/bin/python3 -m qq_chatbot qq \
     --ws ws://127.0.0.1:3001 \
     --store %h/qq-chatbot/.chatbot \

@@ -69,10 +69,26 @@ sudo -u qqbot cp deploy/chatbot.yaml.example /opt/qq-chatbot/chatbot.yaml
 sudo -u qqbot vim /opt/qq-chatbot/chatbot.yaml
 ```
 
-### 3.2 LLM / 向量化（二选一）
+### 3.2 LLM / 向量化
 
-- **本地 ollama**：`curl -fsSL https://ollama.com/install.sh | sh`，再 `ollama pull qwen2.5:7b`、`ollama pull nomic-embed-text`（仅 embedding 用 ollama 时需要）。
-- **云端 API**：`chatbot.yaml` 里把 `llm.provider` 设成 `openai` 并填 `base_url`/`api_key`。
+**默认方案：云端 API（LLM 生成）+ 本机 hash（向量化）** —— 检索全离线，只有检索到的几条片段上云。
+
+```bash
+# 1) 配置已内置在 deploy/chatbot.yaml（provider: openai，默认 DeepSeek）
+#    要换通义/OpenAI，改 chatbot.yaml 里 llm.base_url / model 即可
+
+# 2) 填 API key（不写进 chatbot.yaml，走环境变量）
+cp deploy/.env.example /home/example-user/qq-chatbot/.env
+vim /home/example-user/qq-chatbot/.env   # 把 QQ_CHATBOT_API_KEY=sk-... 填成你的 key
+chmod 600 /home/example-user/qq-chatbot/.env
+```
+
+- DeepSeek key 在 <https://platform.deepseek.com/api_keys> 创建，`base_url=https://api.deepseek.com/v1`。
+- 通义千问 key 在 <https://platform.qianwenai.com/home/api-keys> 创建，`base_url=https://dashscope.aliyuncs.com/compatible-mode/v1`。
+
+> 向量化固定用 `hash`（零依赖、离线），所以**不需要**装 ollama，也不需要给云端发全量历史。
+
+**备选（要完全离线时）**：本地 ollama —— `curl -fsSL https://ollama.com/install.sh | sh`，再 `ollama pull qwen2.5:7b`，`chatbot.yaml` 里 `llm.provider: ollama`。
 
 ### 3.3 NapCat（机器人账号 900001）
 
