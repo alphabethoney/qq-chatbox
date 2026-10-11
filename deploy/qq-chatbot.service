@@ -1,0 +1,24 @@
+[Unit]
+Description=qq-chatbot（基于 QQ 聊天记录的问答/数字分身机器人）
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 改成实际部署用户
+User=qqbot
+Group=qqbot
+WorkingDirectory=/opt/qq-chatbot
+# 用 .venv 里的 python；--store 指向索引目录，--config 指向配置文件
+ExecStart=/opt/qq-chatbot/.venv/bin/python -m qq_chatbot qq \
+    --ws ws://127.0.0.1:3001 \
+    --store /opt/qq-chatbot/.chatbot \
+    --config /opt/qq-chatbot/chatbot.yaml
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+# 敏感数据不写盘：口令/索引属敏感信息，注意权限
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

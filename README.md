@@ -1,8 +1,8 @@
 # qq-chatbox
 
-把 Windows 版 **NTQQ** 的本地聊天记录导出为 **JSON / 纯 TXT**，支持**媒体下载**与**定时增量导出**。
+把 Windows 版 **NTQQ** 的本地聊天记录导出为 **JSON / 纯 TXT**，支持**媒体下载**与**定时增量导出**，并在此基础上把聊天记录「提炼」成可对话的机器人（数字分身 / 历史问答）。
 
-纯 Python 实现，不需要编译 SQLCipher 扩展。解密密钥通过 **NapCat**（开源的 NTQQ 协议框架）在登录时自动截获，本工具负责「解密 → 解析 → 导出」。
+纯 Python 实现，不需要编译 SQLCipher 扩展。解密密钥通过 **NapCat**（开源的 NTQQ 协议框架）在登录时自动截获，本工具负责「解密 → 解析 → 导出 → 对话」。
 
 ---
 
@@ -244,6 +244,80 @@ qq_exporter/
 tests/run_tests.py 自测套件
 tools/             造样本库、大库容错导出
 ```
+
+---
+
+## 聊天机器人（qq-chatbot）
+
+在导出结果之上，`qq_chatbot` 把聊天记录「提炼」成可对话的机器人，支持两种可切换模式：
+
+* **数字分身（persona）**：模仿某个指定人的说话风格、口头禅、观点与事实。
+* **历史问答（qa）**：面向聊天记录做检索式问答，回答带出处，查不到就明说。
+
+```powershell
+# 1) 构建索引（二选一：明文库 或 已有 JSON 导出）
+.\.venv\Scripts\python.exe -m qq_chatbot build --db plain.db
+.\.venv\Scripts\python.exe -m qq_chatbot build --json out/json
+
+# 2) 聊天
+.\.venv\Scripts\python.exe -m qq_chatbot chat --mode qa
+.\.venv\Scripts\python.exe -m qq_chatbot chat --mode persona --person c2c:10001
+
+# 3) 单次提问 / 人格档案 / HTTP 服务
+.\.venv\Scripts\python.exe -m qq_chatbot ask "我们上次约饭是什么时候"
+.\.venv\Scripts\python.exe -m qq_chatbot profile --person c2c:10001
+.\.venv\Scripts\python.exe -m qq_chatbot serve --port 8000
+```
+
+默认 **hash 向量 + mock LLM 零额外依赖即可跑通**（便于演示与自测）。要接真实模型，写一个 `chatbot.yaml`：
+
+```yaml
+llm: { provider: ollama, model: qwen2.5:7b, base_url: http://localhost:11434 }
+embedding: { provider: ollama, model: nomic-embed-text, base_url: http://localhost:11434, dim: 768 }
+retrieval: { top_k: 8, vector_weight: 0.7, min_score: 0.35 }
+```
+
+也支持 OpenAI 兼容端点（`provider: openai`，配 `api_key`，可接通义/DeepSeek 等）。完整结构见 [`docs/chatbot-structure.md`](docs/chatbot-structure.md)。
+
+> 注意：云端后端会把聊天内容发送到远程 API；本地 ollama 模式全程离线。索引与人格档案落在 `.chatbot/`，已被 `.gitignore` 排除。
+
+### 接入 QQ（群聊 + 私聊）
+
+机器人可以挂在 NapCat 的 OneBot11 WebSocket 上，作为**群聊 + 私聊**的问答/数字分身机器人：
+
+```powershell
+pip install websocket-client
+.\.venv\Scripts\python.exe -m qq_chatbot qq --ws ws://127.0.0.1:3001
+# 数字分身机器人：
+.\.venv\Scripts\python.exe -m qq_chatbot qq --mode persona --person c2c:10001
+```
+
+行为：私聊直接回复；群聊默认 `@机器人` 才回复（可配 `group_trigger: all` 全量回复）；
+群聊问答只检索本群记录；群内/私聊可用 `/qa`、`/persona <key>`、`/cite`、`/help` 切换。
+
+> **读取与机器人分离部署**（Windows 导出 + Linux 主机跑机器人）见 [`deploy/README.md`](deploy/README.md)。
+
+> persona 是「模仿口吻」，不是登录对方账号；冒充他人账号违反 QQ 协议，请用机器人账号承载。
+
+### 获取数据库口令（NapCat 插件）
+
+导出聊天记录需要数据库口令。内置了一个 NapCat 小插件，登录后自动打印并保存该口令：
+
+```powershell
+# 安装（把插件目录复制到 NapCat 插件目录）
+robocopy tools\napcat-plugin-db-passphrase "D:\NapCat\napcat\plugins\db-passphrase" /E
+# 启动 NapCat，用「导出账号」扫码登录 → 控制台打印
+#   [db-passphrase] 数据库口令 passphrase = XXXXXXXXXXXXXXXX
+# 也会保存到 plugins\db-passphrase\passphrase.json
+```
+
+拿到口令后解密导出：
+
+```powershell
+.\.venv\Scripts\python.exe -m qq_exporter all --qq <导出账号> --passphrase "<16字符口令>" --out out
+```
+
+> **导出账号 ≠ 机器人账号**：口令是「账号固定」的，只需在导出账号登录时抓一次；之后 NapCat 可切换/重登成机器人账号跑 `qq`。两阶段互不影响。
 
 ---
 
