@@ -19,7 +19,7 @@ embedding:
   dim: 256
 
 store:
-  dir: /home/example-user/qq-chatbot/.chatbot
+  dir: /home/<用户>/qq-chatbot/.chatbot
 
 retrieval:
   top_k: 8
@@ -32,8 +32,8 @@ session:
 bridge:
   ws_url: ws://127.0.0.1:3001
   mode: persona            # 数字分身；群内发 /qa 可切历史问答
-  persona_person: c2c:10001   # 模仿的人（跨私聊+群聊；私聊用私聊人格、群聊用群聊人格）
-  persona_name: 示例人物               # 数字分身的自称（空则用 QQ 号）
+  persona_person: ""        # 模仿的人（如 c2c:10001；跨私聊+群聊；私聊用私聊人格、群聊用群聊人格）
+  persona_name: ""          # 数字分身的自称（空则用 QQ 号）
   merge_group_into_private: true   # 私聊人格：知识融入群聊内容，语气仍用私聊
   group_trigger: at        # at | all
   restrict_group_scope: true

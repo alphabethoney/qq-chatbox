@@ -4,9 +4,9 @@
     解密当前库 → 容错导出(live) → 与全量历史(base)合并去重 → 重建索引 → (可选)推送到主机并重启服务
 
 用法:
-    python tools/sync_index.py --passphrase <16字符口令> --person 10001 \
+    python tools/sync_index.py --passphrase <16字符口令> --person <QQ号> \
         [--base-json out/json] [--live-db <当前库路径>] [--out .chatbot] \
-        [--host example-user@192.0.2.10] [--push]
+        [--host <用户>@<主机IP>] [--push]
 
 口令可用 --passphrase 传，或用 --passphrase-file 指向一个只含口令的文件（避免出现在命令行历史里）。
 """
@@ -23,7 +23,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-DEFAULT_LIVE_DB = Path.home() / "Documents/Tencent Files/20002/nt_qq/nt_db/nt_msg.db"
+# 不内置默认账号路径（避免在仓库里泄露账号信息），调用方需显式传 --live-db。
+DEFAULT_LIVE_DB: str | None = None
 
 
 def _run(cmd: list[str]) -> None:
@@ -138,15 +139,18 @@ def main() -> int:
     ap.add_argument("--passphrase", help="16 字符 ASCII 口令")
     ap.add_argument("--passphrase-file", help="只含口令的文件（比命令行更安全）")
     ap.add_argument("--key", help="32 字节密钥（hex 64 字符），优先于口令")
-    ap.add_argument("--live-db", default=str(DEFAULT_LIVE_DB), help="导出账号当前库路径")
-    ap.add_argument("--person", default="10001", help="只索引这个 QQ 号的人")
+    ap.add_argument("--live-db", default=str(DEFAULT_LIVE_DB) if DEFAULT_LIVE_DB else None, help="导出账号当前库路径")
+    ap.add_argument("--person", default="", help="只索引这个 QQ 号的人")
     ap.add_argument("--base-json", default="out/json", help="全量历史导出目录（首次同步保留）")
     ap.add_argument("--work", default="_work/sync", help="中间文件目录")
     ap.add_argument("--out", default=".chatbot", help="索引输出目录")
-    ap.add_argument("--host", default="example-user@192.0.2.10", help="机器人主机 SSH 地址")
+    ap.add_argument("--host", default="", help="机器人主机 SSH 地址")
     ap.add_argument("--push", action="store_true", help="推送到主机并重启服务")
     args = ap.parse_args()
 
+    if not args.live_db:
+        print("需要 --live-db <当前库路径>")
+        return 1
     passphrase = args.passphrase
     if not passphrase and args.passphrase_file:
         passphrase = Path(args.passphrase_file).read_text(encoding="utf-8").strip()

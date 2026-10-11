@@ -4,14 +4,14 @@
 机器人是常驻服务（在 Linux 主机上跑）。两者之间只搬运一个目录 `.chatbot/`。
 
 ```
-┌─ 读取机（Windows，导出账号 20002）───────────────────┐
+┌─ 读取机（Windows，导出账号）───────────────────┐
 │ ① NapCat(导出账号) → db-passphrase 插件 → 口令             │
-│ ② qq_exporter all --qq 20002 --passphrase <口令>     │
+│ ② qq_exporter all --qq <导出账号> --passphrase <口令>     │
 │ ③ qq_chatbot build --json out/json  →  产出 .chatbot/     │
 └──────────────────────────┬───────────────────────────────┘
                            │  scp -r .chatbot  → 主机
 ┌──────────────────────────▼───────────────────────────────┐
-│ 主机（Linux，机器人账号 900001）                       │
+│ 主机（Linux，机器人账号）                       │
 │ ④ NapCat(机器人账号) → OneBot11 ws://127.0.0.1:3001        │
 │ ⑤ qq_chatbot qq（systemd 常驻）                           │
 └───────────────────────────────────────────────────────────┘
@@ -26,7 +26,7 @@
 D:\NapCat\napcat.bat
 
 # 2) 解密导出
-.\.venv\Scripts\python.exe -m qq_exporter all --qq 20002 --passphrase "<16字符口令>" --out out
+.\.venv\Scripts\python.exe -m qq_exporter all --qq <导出账号> --passphrase "<16字符口令>" --out out
 
 # 3) 建索引（向量化用 hash 则零依赖；用 ollama/openai 见下方注意）
 .\.venv\Scripts\python.exe -m qq_chatbot build --json out/json
@@ -78,9 +78,9 @@ sudo -u qqbot vim /opt/qq-chatbot/chatbot.yaml
 #    要换通义/OpenAI，改 chatbot.yaml 里 llm.base_url / model 即可
 
 # 2) 填 API key（不写进 chatbot.yaml，走环境变量）
-cp deploy/.env.example /home/example-user/qq-chatbot/.env
-vim /home/example-user/qq-chatbot/.env   # 把 QQ_CHATBOT_API_KEY=sk-... 填成你的 key
-chmod 600 /home/example-user/qq-chatbot/.env
+cp deploy/.env.example /home/<用户>/qq-chatbot/.env
+vim /home/<用户>/qq-chatbot/.env   # 把 QQ_CHATBOT_API_KEY=sk-... 填成你的 key
+chmod 600 /home/<用户>/qq-chatbot/.env
 ```
 
 - DeepSeek key 在 <https://platform.deepseek.com/api_keys> 创建，`base_url=https://api.deepseek.com/v1`。
@@ -90,7 +90,7 @@ chmod 600 /home/example-user/qq-chatbot/.env
 
 **备选（要完全离线时）**：本地 ollama —— `curl -fsSL https://ollama.com/install.sh | sh`，再 `ollama pull qwen2.5:7b`，`chatbot.yaml` 里 `llm.provider: ollama`。
 
-### 3.3 NapCat（机器人账号 900001）
+### 3.3 NapCat（机器人账号）
 
 在 Linux 主机上跑 NapCat 并登录机器人账号，开启 OneBot11 正向 WebSocket `127.0.0.1:3001`
 （Docker 推荐，端口映射 `-p 3001:3001`）：
@@ -100,7 +100,7 @@ docker run -d --name napcat --restart=always \
   -p 6099:6099 -p 3001:3001 \
   -v napcat_data:/app/napcat/config \
   napneko/napcat
-# 首次用 docker logs napcat 查看登录二维码，手机扫码登录 900001
+# 首次用 docker logs napcat 查看登录二维码，手机扫码登录 <机器人账号>
 # 登录后到 WebUI http://<主机>:6099 配置网络 → WebSocket 服务端 127.0.0.1:3001
 ```
 
