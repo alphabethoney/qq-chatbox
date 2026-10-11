@@ -21,6 +21,8 @@ def load_corpus(
     limit: int | None = None,
     since: int | None = None,
     people: set[str] | None = None,
+    conversations: set[str] | None = None,
+    person: str | None = None,
     progress=None,
 ) -> Corpus:
     """从明文库或 JSON 导出目录装载语料。
@@ -32,6 +34,8 @@ def load_corpus(
     limit：只取前 N 条消息（调试用）。
     since：只保留该时间戳之后的消息（秒）。
     people：只保留这些说话人（Speaker.key 集合）。
+    conversations：只保留这些会话（conversation_key 集合，如 c2c:10001）。
+    person：只保留这个 QQ 号的人（跨私聊 + 所有群）。
     """
     if bool(db) == bool(json_dir):
         raise ValueError("load_corpus 需要 --db 或 --json 之一（且只能其一）")
@@ -43,7 +47,7 @@ def load_corpus(
         convs, meta = _from_json(Path(json_dir), limit)
         source = str(json_dir)
 
-    turns = build_turns(convs, since=since, people=people)
+    turns = build_turns(convs, since=since, people=people, conversation_keys=conversations, person_qq=person)
     speakers = {t.speaker.key: t.speaker for t in turns}
     meta = dict(meta)
     meta.update({"source": source, "turn_count": len(turns), "speaker_count": len(speakers)})

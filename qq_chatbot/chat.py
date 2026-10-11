@@ -7,7 +7,7 @@ from .index import HybridRetriever, load_store, make_embedding
 from .llm import make_llm
 from .profile import build_profile, load_profiles
 from .prompt import build_persona_messages, build_qa_messages
-from .schema import Answer, Citation, Corpus, PersonaProfile
+from .schema import Answer, Citation, Corpus, PersonaProfile, speaker_qq
 from .session import Session
 
 
@@ -40,7 +40,8 @@ class Chatbot:
         if mode == "persona":
             if not person:
                 raise ValueError("persona 模式需要指定 --person <speaker_key>")
-            filters: dict = {"speaker": person}
+            # 用 QQ 号跨「私聊 + 群聊」匹配这个人（person 可能是 c2c:xxx 或 group:xxx:xxx）
+            filters: dict = {"person_qq": speaker_qq(person)}
         else:
             filters = {}
         if conversation is not None:
@@ -64,10 +65,12 @@ class Chatbot:
             return Answer(text, [self._cite(rt) for rt in good], grounded=True)
 
         # persona
-        profile = self.profiles.get(person)
+        # 按 (person, kind) 缓存，支持「私聊人格 / 群聊人格」分离
+        cache_key = f"{person}#{kind or ''}"
+        profile = self.profiles.get(cache_key)
         if profile is None and self.corpus is not None:
-            profile = build_profile(self.corpus, person, self.llm)
-            self.profiles[person] = profile
+            profile = build_profile(self.corpus, person, self.llm, kind=kind)
+            self.profiles[cache_key] = profile
         profile = profile or PersonaProfile(speaker=person)
         msgs = build_persona_messages(query, retrieved, profile, history)
         text = self.llm.chat(msgs, temperature=temp, max_tokens=max_tokens)

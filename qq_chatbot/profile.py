@@ -7,7 +7,7 @@ import re
 from collections import Counter
 from pathlib import Path
 
-from .schema import Corpus, PersonaProfile
+from .schema import Corpus, PersonaProfile, speaker_qq
 from .index.embeddings import tokenize
 
 _STOP = {
@@ -28,10 +28,15 @@ def build_profile(
     speaker_key: str,
     llm=None,
     *,
+    kind: str | None = None,
     sample: int = 200,
     progress=None,
 ) -> PersonaProfile:
-    turns = [t for t in corpus.turns if t.speaker.key == speaker_key]
+    # 用 QQ 号匹配这个人（跨私聊 + 群聊），并按 kind 细分（c2c=私聊人格 / group=群聊人格）
+    qq = speaker_qq(speaker_key)
+    turns = [t for t in corpus.turns if speaker_qq(t.speaker.key) == qq]
+    if kind is not None:
+        turns = [t for t in turns if t.kind == kind]
     profile = PersonaProfile(speaker=speaker_key)
     if not turns:
         return profile

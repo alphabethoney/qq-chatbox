@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from .schema import Speaker, Turn
+from .schema import Speaker, Turn, speaker_qq
 
 # 非文本消息：text 为空（图片/文件/语音等）默认不入索引
 _EMPTY_TEXT_PLACEHOLDER = ""
@@ -19,10 +19,13 @@ def build_turns(
     max_turn_chars: int = 1200,
     since: int | None = None,
     people: set[str] | None = None,
+    conversation_keys: set[str] | None = None,
+    person_qq: str | None = None,
 ) -> list[Turn]:
     """把消息聚合成 ``Turn`` 列表。
 
-    - 过滤：无文本内容的消息跳过；``since`` 之前、不在 ``people`` 内的说话人跳过。
+    - 过滤：无文本内容的消息跳过；``since`` 之前、不在 ``people``/``conversation_keys``/``person_qq`` 内的跳过。
+    - ``person_qq``：只保留该 QQ 号这个人（跨私聊 + 所有群）的发言。
     - 合并：同一会话同一人、间隔 ≤ ``merge_gap_s`` 的连续消息合并为一轮。
     - 切块：超过 ``max_turn_chars`` 的轮按字符切块（带少量 overlap）。
     """
@@ -32,6 +35,8 @@ def build_turns(
     for conv in conversations:
         kind = conv.get("kind") or ("group" if "group" in str(conv.get("key")) else "c2c")
         conv_key = conv.get("key") or ""
+        if conversation_keys is not None and conv_key not in conversation_keys:
+            continue
         msgs = sorted(conv.get("messages", []), key=lambda m: (m.get("time") or 0, m.get("msg_id") or 0))
 
         cur: dict | None = None  # 当前正在聚合的轮
@@ -44,6 +49,8 @@ def build_turns(
                 continue
             speaker = _resolve_speaker(conv, kind, msg)
             if people is not None and speaker.key not in people:
+                continue
+            if person_qq is not None and speaker_qq(speaker.key) != person_qq:
                 continue
 
             if (

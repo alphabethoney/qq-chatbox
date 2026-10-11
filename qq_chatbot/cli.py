@@ -23,6 +23,7 @@ def cmd_build(args) -> int:
     if args.out:
         cfg.store.dir = Path(args.out)
     people = set(args.people.split(",")) if args.people else None
+    conversations = set(args.conversations.split(",")) if args.conversations else None
     corpus = load_corpus(
         db=args.db,
         json_dir=args.json_dir,
@@ -30,6 +31,8 @@ def cmd_build(args) -> int:
         limit=args.limit,
         since=args.since,
         people=people,
+        conversations=conversations,
+        person=args.person,
         progress=_p,
     )
     if not corpus.turns:
@@ -139,6 +142,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--limit", type=int, help="只取前 N 条消息")
     p.add_argument("--since", type=int, help="只保留该时间戳之后（秒）")
     p.add_argument("--people", help="只保留这些说话人（Speaker.key 逗号分隔）")
+    p.add_argument("--conversations", help="只保留这些会话（conversation_key 逗号分隔，如 c2c:10001）")
+    p.add_argument("--person", help="只保留这个 QQ 号的人（跨私聊 + 所有群）")
     p.add_argument("--out", help="索引输出目录（默认 .chatbot）")
     p.add_argument("--config", help="配置文件（YAML/JSON）")
     p.set_defaults(func=cmd_build)

@@ -106,12 +106,15 @@ class BridgeRuntime:
                                "persona 模式需要先指定说话人：发送 /persona <key>")]
 
         session = self.sessions.setdefault(key, Session(self.bot.config.session.max_turns))
+        # persona 模式下，私聊用「私聊人格」、群聊用「群聊人格」
+        persona_kind = ("group" if msg_type == "group" else "c2c") if mode == "persona" else None
         try:
             if msg_type == "group" and self.cfg.restrict_group_scope:
                 ans = self.bot.answer(text, mode=mode, person=person, session=session,
-                                      conversation=f"group:{group_id}")
+                                      kind=persona_kind, conversation=f"group:{group_id}")
             else:
-                ans = self.bot.answer(text, mode=mode, person=person, session=session)
+                ans = self.bot.answer(text, mode=mode, person=person, session=session,
+                                      kind=persona_kind)
         except ValueError as exc:
             return [self._reply(group_id, user_id, msg_type, f"错误：{exc}")]
 

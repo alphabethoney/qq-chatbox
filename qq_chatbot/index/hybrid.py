@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from ..config import RetrievalConfig
-from ..schema import RetrievedTurn
+from ..schema import RetrievedTurn, speaker_qq
 from .base import EmbeddingProvider, Retriever
 from .store import MemoryStore
 
@@ -25,6 +25,7 @@ class HybridRetriever(Retriever):
         *,
         top_k: int | None = None,
         speaker: str | None = None,
+        person_qq: str | None = None,
         conversation: str | None = None,
         kind: str | None = None,
         time_range: tuple[int, int] | None = None,
@@ -39,6 +40,8 @@ class HybridRetriever(Retriever):
         for idx, score, vs, ks in raw:
             turn = self.store.turns[idx]
             if speaker is not None and turn.speaker.key != speaker:
+                continue
+            if person_qq is not None and speaker_qq(turn.speaker.key) != person_qq:
                 continue
             if conversation is not None and turn.conversation_key != conversation:
                 continue

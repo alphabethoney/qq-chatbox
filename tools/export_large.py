@@ -50,39 +50,42 @@ def _fmt(ts):
 
 
 def _lean(row, me):
-    """row 是一段按 MSG_COLS 顺序的值序列，转成精简 dict。
+    """row 是一段按 MSG_COLS 顺序的值序列，转成标准消息 dict（与 iter_messages 同构，供 qq_chatbot 使用）。
 
     方向判定用「发送者是否等于本账号」，比 40013 的取值更可靠
     （实测 40013∈{1,2,4,5} 表示发出、{0,3} 表示收到，版本间易变）。
     """
     m = dict(zip(MSG_COLS, row))
     blob = m.get("40800")
-    text, _ = parse_body(bytes(blob)) if isinstance(blob, (bytes, bytearray)) else ("", [])
+    text, segments = parse_body(bytes(blob)) if isinstance(blob, (bytes, bytearray)) else ("", [])
     ts = _to_int(m.get("40050"))
     sq = _to_int(m.get("40033"))
-    return {
-        "t": ts,
-        "ts": _fmt(ts),
-        "d": "out" if (sq is not None and str(sq) == str(me)) else "in",
-        "su": m.get("40020"),
-        "sq": sq,
-        "pu": m.get("40021"),
-        "pq": _to_int(m.get("40030")),
-        "mt": _to_int(m.get("40011")),
-        "sub": _to_int(m.get("40012")),
-        "id": _to_int(m.get("40001")),
+    msg = {
+        "msg_id": _to_int(m.get("40001")),
+        "time": ts,
+        "time_str": _fmt(ts),
+        "direction": "out" if (sq is not None and str(sq) == str(me)) else "in",
+        "sender_uid": m.get("40020"),
+        "sender_qq": sq,
+        "peer_uid": m.get("40021"),
+        "peer_qq": _to_int(m.get("40030")),
+        "msg_type": _to_int(m.get("40011")),
+        "subtype": _to_int(m.get("40012")),
         "text": text,
     }
+    if segments:
+        msg["segments"] = segments
+    return msg
 
 
 def conv_key_of(kind, m):
     if kind == "group":
-        gid = m["pq"] or m["pu"] or "?"
-        return f"group:{gid}", str(gid), m["pu"]
-    if m["d"] == "in":
-        q, u = m["sq"], m["su"]
+        gid = m["peer_qq"] or m["peer_uid"] or "?"
+        return f"group:{gid}", str(gid), m["peer_uid"]
+    if m["direction"] == "in":
+        q, u = m["sender_qq"], m["sender_uid"]
     else:
-        q, u = m["pq"], m["pu"]
+        q, u = m["peer_qq"], m["peer_uid"]
     ident = q if q is not None else u
     return f"c2c:{ident}", str(q) if q is not None else None, u
 
@@ -133,7 +136,7 @@ def main() -> int:
     n = 0
     for row in conn.execute(f'SELECT {sel} FROM "{c2c_tab}" ORDER BY rowid'):
         m = _lean(tuple(row), me)
-        seen.add(m["id"])
+        seen.add(m["msg_id"])
         bucket("c2c", m)
         n += 1
     print(f"c2c 读取 {n:,} 条", flush=True)
@@ -158,9 +161,9 @@ def main() -> int:
             break
         for r in rows:
             m = _lean(tuple(r), me)
-            if m["id"] in seen:
+            if m["msg_id"] in seen:
                 continue
-            seen.add(m["id"])
+            seen.add(m["msg_id"])
             bucket("group", m)
         fwd += len(rows)
         last = rows[-1]["40001"]
@@ -179,9 +182,9 @@ def main() -> int:
             break
         for r in rows:
             m = _lean(tuple(r), me)
-            if m["id"] in seen:
+            if m["msg_id"] in seen:
                 continue
-            seen.add(m["id"])
+            seen.add(m["msg_id"])
             bucket("group", m)
         bwd += len(rows)
         last = rows[-1]["40001"]
@@ -194,7 +197,7 @@ def main() -> int:
     print(f"\n共 {len(convs)} 个会话 / {total:,} 条消息（group 正向 {fwd:,} + 反向 {bwd:,}）", flush=True)
 
     for c in convs.values():
-        c["messages"].sort(key=lambda m: (m["t"] or 0, m["id"] or 0))
+        c["messages"].sort(key=lambda m: (m["time"] or 0, m["msg_id"] or 0))
 
     names = {}
     if args.names:
@@ -217,8 +220,9 @@ def main() -> int:
             "peer_qq": c["peer_qq"],
             "peer_uid": c["peer_uid"],
             "message_count": len(c["messages"]),
-            "first_time": c["messages"][0]["t"] if c["messages"] else None,
-            "last_time": c["messages"][-1]["t"] if c["messages"] else None,
+            "first_time": c["messages"][0]["time"] if c["messages"] else None,
+            "last_time": c["messages"][-1]["time"] if c["messages"] else None,
+            "file": f"{stem}.json",
         }
         idx.append(entry)
 
@@ -231,9 +235,9 @@ def main() -> int:
             lines = ["=" * 70, f"会话: {c['title']}", f"类型: {'群聊' if c['kind']=='group' else '私聊'}",
                      f"标识: {key}", f"消息数: {len(c['messages'])}", "=" * 70, ""]
             for m in c["messages"]:
-                who = m["sq"] or m["su"] or "?"
-                arrow = "->" if m["d"] == "out" else "<-"
-                lines.append(f"[{m['ts'] or '未知时间'}] {arrow} {who}")
+                who = m["sender_qq"] or m["sender_uid"] or "?"
+                arrow = "->" if m["direction"] == "out" else "<-"
+                lines.append(f"[{m['time_str'] or '未知时间'}] {arrow} {who}")
                 t = (m["text"] or "").rstrip() or "（非文本消息）"
                 lines.extend(f"    {ln}" for ln in t.splitlines())
                 lines.append("")
@@ -242,7 +246,7 @@ def main() -> int:
         if (i + 1) % 200 == 0:
             print(f"  已导出 {i+1}/{len(convs)} 个会话", flush=True)
 
-    (out / "index.json").write_text(
+    (out / "json" / "index.json").write_text(
         json.dumps({"conversation_count": len(idx), "message_count": total, "conversations": idx},
                    ensure_ascii=False, indent=1),
         encoding="utf-8",

@@ -11,12 +11,21 @@ from dataclasses import dataclass, field
 
 @dataclass
 class Speaker:
-    key: str                # "c2c:10001" / "group:123456/u_alice" / "me"
+    key: str                # "c2c:10001" / "group:123456/10001" / "me"
     name: str               # 解析后的显示名
     is_self: bool = False
 
     def __hash__(self) -> int:
         return hash(self.key)
+
+
+def speaker_qq(key: str) -> str:
+    """从 speaker key 提取 QQ 号（末尾一段）。
+
+    "c2c:10001" -> "10001"；"group:123:10001" -> "10001"；"me" -> "me"。
+    用于「某个人跨私聊/群聊」的匹配。
+    """
+    return key.rsplit(":", 1)[-1]
 
 
 @dataclass
