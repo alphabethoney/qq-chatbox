@@ -31,8 +31,8 @@ session:
 
 bridge:
   ws_url: ws://127.0.0.1:3001
-  mode: qa                 # qa | persona
-  persona_person: ""
+  mode: persona            # 数字分身；群内发 /qa 可切历史问答
+  persona_person: c2c:10001   # 模仿的人（跨私聊+群聊；私聊用私聊人格、群聊用群聊人格）
   group_trigger: at        # at | all
   restrict_group_scope: true
   rate_limit_per_min: 30
