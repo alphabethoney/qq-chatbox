@@ -1,8 +1,8 @@
-# qq-chat-exporter
+# qq-chatbox
 
-把 Windows 版 **NTQQ** 的本地聊天记录导出为 **JSON** 和 **纯 TXT**。
+把 Windows 版 **NTQQ** 的本地聊天记录导出为 **JSON / 纯 TXT**，并在此基础上把聊天记录「提炼」成可对话的机器人（数字分身 / 历史问答）。
 
-纯 Python 实现，不需要编译 SQLCipher 扩展。解密密钥通过 **NapCat**（开源的 NTQQ 协议框架）在登录时自动截获，本工具负责「解密 → 解析 → 导出」。
+纯 Python 实现，不需要编译 SQLCipher 扩展。解密密钥通过 **NapCat**（开源的 NTQQ 协议框架）在登录时自动截获，本工具负责「解密 → 解析 → 导出 → 对话」。
 
 ---
 
@@ -203,6 +203,42 @@ qq_exporter/
 tests/run_tests.py 自测套件
 tools/             造样本库、大库容错导出
 ```
+
+---
+
+## 聊天机器人（qq-chatbot）
+
+在导出结果之上，`qq_chatbot` 把聊天记录「提炼」成可对话的机器人，支持两种可切换模式：
+
+* **数字分身（persona）**：模仿某个指定人的说话风格、口头禅、观点与事实。
+* **历史问答（qa）**：面向聊天记录做检索式问答，回答带出处，查不到就明说。
+
+```powershell
+# 1) 构建索引（二选一：明文库 或 已有 JSON 导出）
+.\.venv\Scripts\python.exe -m qq_chatbot build --db plain.db
+.\.venv\Scripts\python.exe -m qq_chatbot build --json out/json
+
+# 2) 聊天
+.\.venv\Scripts\python.exe -m qq_chatbot chat --mode qa
+.\.venv\Scripts\python.exe -m qq_chatbot chat --mode persona --person c2c:10001
+
+# 3) 单次提问 / 人格档案 / HTTP 服务
+.\.venv\Scripts\python.exe -m qq_chatbot ask "我们上次约饭是什么时候"
+.\.venv\Scripts\python.exe -m qq_chatbot profile --person c2c:10001
+.\.venv\Scripts\python.exe -m qq_chatbot serve --port 8000
+```
+
+默认 **hash 向量 + mock LLM 零额外依赖即可跑通**（便于演示与自测）。要接真实模型，写一个 `chatbot.yaml`：
+
+```yaml
+llm: { provider: ollama, model: qwen2.5:7b, base_url: http://localhost:11434 }
+embedding: { provider: ollama, model: nomic-embed-text, base_url: http://localhost:11434, dim: 768 }
+retrieval: { top_k: 8, vector_weight: 0.7, min_score: 0.35 }
+```
+
+也支持 OpenAI 兼容端点（`provider: openai`，配 `api_key`，可接通义/DeepSeek 等）。完整结构见 [`docs/chatbot-structure.md`](docs/chatbot-structure.md)。
+
+> 注意：云端后端会把聊天内容发送到远程 API；本地 ollama 模式全程离线。索引与人格档案落在 `.chatbot/`，已被 `.gitignore` 排除。
 
 ---
 
