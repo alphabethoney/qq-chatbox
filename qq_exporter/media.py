@@ -74,15 +74,31 @@ def extract_media(blob: bytes) -> list[dict]:
         if host and path:
             url = path if path.startswith("http") else f"https://{host}{path}"
 
+        # fileid 是稳定标识：字段 45503 直接是它，否则从 url 的 fileid= 参数解析
+        raw = _first(inner, 45503)
+        fileid = wire.decode_text(raw) if raw else None
+        if not fileid and url:
+            fileid = _fileid_from_url(url)
+
         out.append(
             {
                 "type": MEDIA_TYPE_NAMES[ctype],
                 "filename": filename,
                 "local_path": local,
                 "url": url,
+                "fileid": fileid,
             }
         )
     return out
+
+
+def _fileid_from_url(url: str) -> str | None:
+    from urllib.parse import parse_qs, urlparse
+
+    try:
+        return parse_qs(urlparse(url).query).get("fileid", [None])[0]
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _safe_name(media: dict, index: int) -> str:
@@ -131,12 +147,13 @@ def download_media(
     out_dir: Path,
     *,
     local_index: dict[str, str] | None = None,
+    napcat=None,
     progress=None,
 ) -> dict:
     """把媒体保存到 ``out_dir``，返回统计 ``{copied, downloaded, skipped, failed}``。
 
-    查找顺序：消息里的本地路径 → ``local_index``（按 MD5）→ HTTP 下载（``url``）。
-    同名文件自动去重。
+    查找顺序：消息里的本地路径 → ``local_index``（按 MD5）→ HTTP 下载（``url``）
+    → ``napcat`` 换新直链再下。同名文件自动去重。
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -174,19 +191,48 @@ def download_media(
             except OSError:
                 pass
         # 3) HTTP 下载（rkey 时效，旧消息可能过期）
-        if m.get("url"):
-            try:
-                req = urllib.request.Request(
-                    m["url"], headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0)"}
-                )
-                with urllib.request.urlopen(req, timeout=20) as resp, open(dest, "wb") as fh:
-                    shutil.copyfileobj(resp, fh)
-                if dest.stat().st_size > 0:
+        if m.get("url") and _http_download(m["url"], dest):
+            stats["downloaded"] += 1
+            continue
+        # 4) NapCat 换新直链（旧媒体 rkey 过期时）
+        if napcat:
+            fresh = napcat.refresh(m)
+            if fresh.get("url") and _http_download(fresh["url"], dest):
+                stats["downloaded"] += 1
+                continue
+            if fresh.get("path"):
+                try:
+                    shutil.copy2(fresh["path"], dest)
                     stats["downloaded"] += 1
                     continue
-            except Exception:  # noqa: BLE001
-                pass
+                except OSError:
+                    pass
+            if fresh.get("base64") and _save_base64(fresh["base64"], dest):
+                stats["downloaded"] += 1
+                continue
 
         stats["failed"] += 1
 
     return stats
+
+
+def _http_download(url: str, dest: Path) -> bool:
+    try:
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0)"}
+        )
+        with urllib.request.urlopen(req, timeout=20) as resp, open(dest, "wb") as fh:
+            shutil.copyfileobj(resp, fh)
+        return dest.stat().st_size > 0
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _save_base64(data: str, dest: Path) -> bool:
+    import base64
+
+    try:
+        dest.write_bytes(base64.b64decode(data))
+        return dest.stat().st_size > 0
+    except Exception:  # noqa: BLE001
+        return False

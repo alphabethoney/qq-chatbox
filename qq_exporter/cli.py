@@ -190,12 +190,21 @@ def cmd_export(args) -> int:
         else:
             local_index = {}
 
+        napcat = None
+        if getattr(args, "napcat", None):
+            from .napcat import NapCat
+
+            napcat = NapCat(
+                args.napcat, getattr(args, "napcat_token", None) or None
+            )
+            _p(f"NapCat 补下载: {args.napcat}")
+
         stats = {"copied": 0, "downloaded": 0, "skipped": 0, "failed": 0}
         for conv, items in conv_media:
             if not items:
                 continue
             d = out_dir / "media" / safe_name(conv.title, conv.key)
-            st = download_media(items, d, local_index=local_index)
+            st = download_media(items, d, local_index=local_index, napcat=napcat)
             for k in stats:
                 stats[k] += st[k]
         _p(
@@ -374,6 +383,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--limit", type=int, help="只导出前 N 条消息（调试用）")
     p.add_argument("--media", action="store_true", help="下载图片/文件/语音/视频/表情到 out/media/")
     p.add_argument("--media-dir", help="QQ 的 nt_data 缓存目录（默认从消息里的路径自动推导）")
+    p.add_argument("--napcat", help="NapCat HTTP 地址（如 http://127.0.0.1:6099），旧媒体 rkey 过期时换新直链")
+    p.add_argument("--napcat-token", help="NapCat HTTP access_token（若 onebot11.json 配置了）")
     p.add_argument("--incremental", action="store_true", help="增量导出：只导出上次之后的新消息")
     p.add_argument("--since", type=int, help="只导出消息ID大于该值的消息")
     p.set_defaults(func=cmd_export)
@@ -385,6 +396,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--interval", type=int, default=3600, help="间隔秒数（默认 3600）")
     p.add_argument("--media", action="store_true", help="下载媒体")
     p.add_argument("--media-dir", help="QQ 的 nt_data 缓存目录")
+    p.add_argument("--napcat", help="NapCat HTTP 地址")
+    p.add_argument("--napcat-token", help="NapCat HTTP access_token")
     p.add_argument("--names")
     p.add_argument("--single-json", action="store_true")
     p.add_argument("--no-segments", action="store_true")
@@ -410,6 +423,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--limit", type=int)
     p.add_argument("--media", action="store_true", help="下载媒体到 out/media/")
     p.add_argument("--media-dir", help="QQ 的 nt_data 缓存目录")
+    p.add_argument("--napcat", help="NapCat HTTP 地址（旧媒体换新直链）")
+    p.add_argument("--napcat-token", help="NapCat HTTP access_token")
     p.add_argument("--incremental", action="store_true", help="增量导出")
     p.add_argument("--since", type=int, help="只导出消息ID大于该值的消息")
     p.add_argument("--yes", action="store_true", help="跳过交互确认")

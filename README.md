@@ -106,6 +106,8 @@ out/
 * `--single-json`：JSON 合并为单文件；
 * `--include-content`：JSON 里附带完整的 Protobuf 字段树（很大）；
 * `--media`：下载图片/文件/语音/视频/表情到 `out/media/`；
+* `--napcat <http地址>`：旧媒体 rkey 过期时，经 NapCat 换新直链补下载；
+* `--napcat-token <token>`：NapCat HTTP 的 access_token（若配置了）；
 * `--incremental`：增量导出（用 `out/.export_state.json` 记录进度）；
 * `--since <消息ID>`：只导出消息 ID 大于该值的消息；
 * `--media-dir <nt_data目录>`：QQ 媒体缓存目录（默认从消息里的本地路径自动推导）。
@@ -119,11 +121,16 @@ out/
 
 1. 消息里记录的本地缓存路径（原图）；
 2. 本地缓存按 **MD5 兜底**（原图被 QQ 清理后，退而求其次拿缩略图）；
-3. HTTP 下载（URL 里的 `rkey` 有时效，旧消息可能已过期）。
+3. HTTP 下载（URL 里的 `rkey` 有时效，旧消息可能已过期）；
+4. **NapCat 富媒体 API 换新直链**（用稳定的 `fileid` 重新换 rkey）。
 
-> 说明：QQ 会定期清理本地媒体缓存、下载 token 也会过期。对于已被清理的旧媒体，
-> 完整恢复需要 NapCat 的**富媒体 API**（重新换 rkey），这超出了本工具的范围。
-> 日常场景里，近期媒体 + 缩略图基本都能覆盖到。
+```powershell
+# 带 NapCat 补下载：旧媒体 rkey 过期时也能补齐
+.\.venv\Scripts\python.exe -m qq_exporter export --db plain.db --media --napcat http://127.0.0.1:6099
+```
+
+> NapCat 必须**运行且已登录**（换 rkey 需要在线会话）。若 `onebot11.json` 配了
+> `access_token`，再加 `--napcat-token <token>`。
 
 ## 定时 / 增量导出
 
