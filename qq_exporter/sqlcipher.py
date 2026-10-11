@@ -288,23 +288,21 @@ def decrypt_wal(
     return frames, db_size
 
 
-def _apply_wal(
-    out: bytearray, frames: list[tuple[int, bytes]], db_size: int, page_size: int
-) -> None:
-    """把 WAL 页面覆盖到已解密的主库数据上。"""
+def _apply_wal_file(fout, frames: list[tuple[int, bytes]], db_size: int, page_size: int) -> None:
+    """把 WAL 页面覆盖到已解密的主库文件上（随机访问 seek+write）。"""
     for pgno, plain in frames:
         if pgno <= 0:
             continue
         start = (pgno - 1) * page_size
         page = plain + b"\x00" * (page_size - len(plain))
-        need = start + page_size
-        if need > len(out):
-            out.extend(b"\x00" * (need - len(out)))
-        out[start:need] = page[:page_size]
+        fout.seek(start)
+        fout.write(page[:page_size])
     if db_size > 0:
         want = db_size * page_size
-        if want < len(out):
-            del out[want:]
+        fout.flush()
+        cur = fout.seek(0, 2)
+        if want < cur:
+            fout.truncate(want)
 
 
 # ---- 整库解密 -------------------------------------------------------------
@@ -321,80 +319,84 @@ def decrypt_database(
 ) -> dict:
     """把 NTQQ 的加密数据库解密成标准 SQLite 文件。
 
+    采用**流式**：按页读取 → 按页解密 → 按页写出，内存占用恒定（与库大小无关）。
+
     :param merge_wal: 是否把 ``-wal`` 里尚未写入主库的页面合并进来
     """
     src = Path(src)
     dst = Path(dst)
 
-    with open(src, "rb") as fh:
-        blob = fh.read()
-
-    body = blob[EXT_HEADER:]
-    if len(body) < PAGE_SIZE:
+    # 1) 读第 1 页，探测保留区大小
+    with open(src, "rb") as fin:
+        fin.seek(EXT_HEADER)
+        page1_enc = fin.read(PAGE_SIZE)
+    if len(page1_enc) < PAGE_SIZE:
         raise ValueError(f"数据库内容不足一页: {src}")
 
     if reserve is None:
-        reserve = detect_reserve(body[:PAGE_SIZE], enc_key)
+        reserve = detect_reserve(page1_enc, enc_key)
         if reserve is None:
             raise ValueError(
                 "无法确定 SQLCipher 保留区大小：密钥可能不对，或库格式与预期不同。"
             )
 
-    total_pages = len(body) // PAGE_SIZE
-    out = bytearray()
-
-    for pgno in range(1, total_pages + 1):
-        start = (pgno - 1) * PAGE_SIZE
-        page = body[start : start + PAGE_SIZE]
-        if len(page) < PAGE_SIZE:
-            page += b"\x00" * (PAGE_SIZE - len(page))
-
-        skip = SALT_SIZE if pgno == 1 else 0
-        plain = decrypt_page(page, enc_key, skip_salt=skip, reserve=reserve)
-
-        if pgno == 1:
-            page1 = bytearray(SQLITE_MAGIC + plain)
-            # 注意：SQLite 头部的「保留区字节」(偏移 20) 不一定要等于 SQLCipher 的
-            # 保留区大小 —— 实测 NTQQ 的库里两者分别是 80 和 48。这里**保留解密
-            # 出来的原值**，否则 SQLite 的 usableSize 会算错，溢出页会读坏。
-            if len(page1) > PAGE_SIZE:
-                page1 = page1[:PAGE_SIZE]
-            page1 += b"\x00" * (PAGE_SIZE - len(page1))
-            out += bytes(page1[:PAGE_SIZE])
-        else:
-            out += plain + b"\x00" * (PAGE_SIZE - len(plain))
-
-        if progress and (pgno % 512 == 0 or pgno == total_pages):
-            progress(pgno, total_pages)
-
-    wal_pages = 0
-    if merge_wal:
-        frames, db_size = decrypt_wal(
-            Path(str(src) + "-wal"), enc_key, reserve, PAGE_SIZE, progress
-        )
-        if frames:
-            _apply_wal(out, frames, db_size, PAGE_SIZE)
-            wal_pages = len(frames)
+    total_pages = max(0, (src.stat().st_size - EXT_HEADER) // PAGE_SIZE)
+    sqlite_reserved_byte = 0
 
     dst.parent.mkdir(parents=True, exist_ok=True)
-    _write(dst, out)
-    integrity = quick_check(dst)
+    with open(src, "rb") as fin, open(dst, "wb") as fout:
+        fin.seek(EXT_HEADER)
+        for pgno in range(1, total_pages + 1):
+            page = fin.read(PAGE_SIZE)
+            if not page:
+                break
+            if len(page) < PAGE_SIZE:
+                page += b"\x00" * (PAGE_SIZE - len(page))
 
-    # 兜底：若保留区字节与 SQLCipher 保留区不一致导致读不出，就在原文件上原地
-    # 改这一个字节再验一次（避免为超大库再复制一份把磁盘写满）。
-    if integrity != "ok" and out[20] != (reserve & 0xFF):
+            skip = SALT_SIZE if pgno == 1 else 0
+            plain = decrypt_page(page, enc_key, skip_salt=skip, reserve=reserve)
+
+            if pgno == 1:
+                page1 = bytearray(SQLITE_MAGIC + plain)
+                # 注意：SQLite 头部的「保留区字节」(偏移 20) 不一定要等于 SQLCipher 的
+                # 保留区大小（实测 NTQQ 分别是 80 和 48）。这里保留解密出来的原值。
+                sqlite_reserved_byte = page1[20]
+                if len(page1) > PAGE_SIZE:
+                    page1 = page1[:PAGE_SIZE]
+                page1 += b"\x00" * (PAGE_SIZE - len(page1))
+                fout.write(bytes(page1[:PAGE_SIZE]))
+            else:
+                fout.write(plain)
+                fout.write(b"\x00" * (PAGE_SIZE - len(plain)))
+
+            if progress and (pgno % 512 == 0 or pgno == total_pages):
+                progress(pgno, total_pages)
+
+        # 2) WAL 合并（随机访问覆盖 / 追加）
+        wal_pages = 0
+        if merge_wal:
+            frames, db_size = decrypt_wal(
+                Path(str(src) + "-wal"), enc_key, reserve, PAGE_SIZE, progress
+            )
+            if frames:
+                _apply_wal_file(fout, frames, db_size, PAGE_SIZE)
+                wal_pages = len(frames)
+
+    # 3) 兜底：若保留区字节与 SQLCipher 保留区不一致导致读不出，原地改这一个字节再验
+    integrity = quick_check(dst)
+    if integrity != "ok" and sqlite_reserved_byte != (reserve & 0xFF):
         try:
             with open(dst, "r+b") as fh:
                 fh.seek(20)
                 fh.write(bytes([reserve & 0xFF]))
             alt_integrity = quick_check(dst)
             if alt_integrity == "ok":
-                out[20] = reserve & 0xFF
+                sqlite_reserved_byte = reserve & 0xFF
                 integrity = alt_integrity
             else:
                 with open(dst, "r+b") as fh:
                     fh.seek(20)
-                    fh.write(bytes([out[20]]))
+                    fh.write(bytes([sqlite_reserved_byte]))
         except OSError:
             pass
 
@@ -403,16 +405,10 @@ def decrypt_database(
         "pages": total_pages,
         "wal_pages": wal_pages,
         "reserve": reserve,
-        "sqlite_reserved_byte": out[20],
-        "bytes": len(out),
+        "sqlite_reserved_byte": sqlite_reserved_byte,
+        "bytes": dst.stat().st_size,
         "integrity": integrity,
     }
-
-
-def _write(path: Path, data: bytes | bytearray) -> None:
-    # 直接写 bytearray，避免 bytes() 再复制一份（大库时能省下几个 GB）
-    with open(path, "wb") as fh:
-        fh.write(data)
 
 
 def quick_check(db_path: Path) -> str:
