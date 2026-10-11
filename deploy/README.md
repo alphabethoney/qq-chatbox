@@ -1,146 +1,93 @@
-# qq-chatbot 部署（Windows 读取机 + Linux 机器人主机）
+# 部署：Windows 读取机与 Linux 机器人主机
 
-「读取/导出」与「机器人」分离：读取是一次性批任务（在持有导出账号数据的机器上做），
-机器人是常驻服务（在 Linux 主机上跑）。两者之间只搬运一个目录 `.chatbot/`。
+读取机负责取得一致数据库快照、解密、导出和构建索引；机器人主机运行模型调用与 QQ 桥接。以下账号、主机、路径和对话均为虚构示例或占位符，需替换为自己的授权环境，不包含实际聊天或本机信息。
 
-```
-┌─ 读取机（Windows，导出账号）───────────────────┐
-│ ① NapCat(导出账号) → db-passphrase 插件 → 口令             │
-│ ② qq_exporter all --qq <导出账号> --passphrase <口令>     │
-│ ③ qq_chatbot build --json out/json  →  产出 .chatbot/     │
-└──────────────────────────┬───────────────────────────────┘
-                           │  scp -r .chatbot  → 主机
-┌──────────────────────────▼───────────────────────────────┐
-│ 主机（Linux，机器人账号）                       │
-│ ④ NapCat(机器人账号) → OneBot11 ws://127.0.0.1:3001        │
-│ ⑤ qq_chatbot qq（systemd 常驻）                           │
-└───────────────────────────────────────────────────────────┘
-```
+功能命令见 [Roadmap 使用指南](<../docs/roadmap-usage.md>)，验收边界见 [ROADMAP](<../docs/ROADMAP.md>)。
 
----
+## 1. 读取机：导出与构建
 
-## 阶段一：读取机（Windows）—— 导出 + 建索引
+先用授权的导出账号登录 NapCat 获取匹配数据库的口令，参见 [主 README](<../README.md>)。不要假定口令跨登录或版本永久不变。
 
 ```powershell
-# 1) 用「导出账号」登录 NapCat，db-passphrase 插件打印口令（见 README「获取数据库口令」）
-D:\NapCat\napcat.bat
-
-# 2) 解密导出
-.\.venv\Scripts\python.exe -m qq_exporter all --qq <导出账号> --passphrase "<16字符口令>" --out out
-
-# 3) 建索引（向量化用 hash 则零依赖；用 ollama/openai 见下方注意）
-.\.venv\Scripts\python.exe -m qq_chatbot build --json out/json
-# 产出 .chatbot/（含 corpus.json、embeddings.json、profiles/）
+python -m qq_exporter all --qq <导出账号> --passphrase "<数据库口令>" --out out
+python -m qq_chatbot build --json out/json --config chatbot.yaml
 ```
 
-> 向量化注意：`build` 时若用默认 `hash`，主机端也用 `hash` 即可（查询时重算，无需网络）。
-> 若用 `ollama`/`openai`，索引里已存好向量，但主机端仍需同一 provider 做「查询向量化」。
+源文件须是一致快照。WAL 合成测试不等于真实 QQ 持续写入场景已验证；时间戳同步目前跳过 WAL，尚未进入主库的消息可能暂时不可见。
 
----
+索引核心产物为 `corpus.json`、`embeddings.json`、`manifest.json`。人格档案、记忆和日志按需生成，分别属于运行状态，不应在每次索引更新时被旧副本覆盖。
 
-## 阶段二：把索引传到 Linux 主机
+## 2. 搬运索引与增量同步
+
+首次部署可将索引核心文件复制到主机的索引目录：
+
+```powershell
+scp .chatbot/corpus.json .chatbot/embeddings.json .chatbot/manifest.json "<SSH用户>@<主机>:<部署目录>/.chatbot/"
+```
+
+首次复制前在主机创建目标目录；运行中的多文件替换不是整体原子发布，安排停机或完成复制后重启以重新加载索引。
+
+后续可使用 [同步工具](<../tools/sync_index.py>) 的 `--push --host`。它保留读取端 `out/.sync` 中的累计原始数据；远端只接收 corpus、embeddings 和剔除本地 sync 状态的 manifest，不覆盖/删除远端 profiles 或 memory。工具的远端路径与重启方式有约定（用户主目录下的部署目录、user service），不同部署布局需先核对，不能直接套用下文 system service 模板。
+
+时间戳增量仍全量解密和重建索引，重读窗口之外的迟到消息用 `--full` 补回。不要把读取端同步累计快照当作机器人必须接收的文件。
+
+## 3. 主机环境与配置
+
+在自己的部署目录中放入 `qq_chatbot/` 包及 [配置示例](<chatbot.yaml>)，使用虚拟环境：
 
 ```bash
-# 在 Windows 上执行（或其它方式）
-scp -r .chatbot  qqbot@<主机IP>:/opt/qq-chatbot/
+python3 -m venv .venv
+.venv/bin/pip install websocket-client PyYAML
+cp deploy/chatbot.yaml chatbot.yaml
 ```
 
----
-
-## 阶段三：Linux 主机部署机器人
-
-### 3.1 安装运行环境
+示例配置文件默认使用云端生成与本地 hash 检索；库本身的默认值是 mock/hash。调整 `store.dir` 或使用 `--store` 指向已搬运的索引。不要把密钥提交到配置示例中。
 
 ```bash
-sudo useradd -r -m -s /usr/sbin/nologin qqbot || true
-sudo mkdir -p /opt/qq-chatbot && sudo chown qqbot:qqbot /opt/qq-chatbot
-
-# 拷贝代码（只需 qq_chatbot 包，不需要 qq_exporter / 数据库 / cryptography）
-scp -r qq_chatbot/  qqbot@<主机IP>:/opt/qq-chatbot/
-
-# Python 环境（机器人运行时唯一必需第三方依赖是 websocket-client）
-sudo -u qqbot python3 -m venv /opt/qq-chatbot/.venv
-sudo -u qqbot /opt/qq-chatbot/.venv/bin/pip install websocket-client
-# 可选：用 YAML 配置时装 PyYAML；用 JSON 配置则不需要
-# sudo -u qqbot /opt/qq-chatbot/.venv/bin/pip install PyYAML
-
-# 配置
-sudo -u qqbot cp deploy/chatbot.yaml.example /opt/qq-chatbot/chatbot.yaml
-sudo -u qqbot vim /opt/qq-chatbot/chatbot.yaml
+export QQ_CHATBOT_API_KEY='<自己的模型服务密钥>'
+.venv/bin/python -m qq_chatbot qq --config chatbot.yaml --store .chatbot
 ```
 
-### 3.2 LLM / 向量化
+环境变量只作用于继承它的进程；systemd 服务不会自动加载当前 shell 的变量或项目 `.env`。如需服务读取密钥，使用自己配置的 `EnvironmentFile` 或等价凭据机制并限制权限。[服务模板](<qq-chatbot.service>) 本身不声明 EnvironmentFile。
 
-**默认方案：云端 API（LLM 生成）+ 本机 hash（向量化）** —— 检索全离线，只有检索到的几条片段上云。
+## 4. 模型与向量空间
+
+[部署配置](<chatbot.yaml>) 提供 OpenAI 兼容生成端点示例；可更换为自己的兼容端点和模型，或改为本地 Ollama。
+
+- hash 向量化不发送全量文本到远端，检索可离线；云端 LLM 会收到实际生成提示，其中可能包含检索片段、对话历史、人格档案和启用的长期摘录，并非只有几条检索正文。
+- Ollama / OpenAI 语义向量已持久化，但查询仍需兼容 provider/model/dim。主机配置不匹配时应修正配置或重建索引。
+- `embedding.fallback_to_hash` 默认 false。显式启用后，后端故障可切换到独立 hash 空间；它会影响检索质量，不能保证语义召回不变。
+- 本地 Ollama 需预先安装模型并可访问服务；本轮离线测试不证明具体在线模型端点已连通。
+
+## 5. NapCat 与常驻服务
+
+在机器人主机运行 NapCat，登录机器人账号并开启 OneBot11 正向 WebSocket。机器人与 NapCat 同机时，可在服务端监听本机接口；容器部署需根据容器内部监听地址及端口映射核对连接，不要把容器内 loopback 与主机 loopback 混为一谈。
 
 ```bash
-# 1) 配置已内置在 deploy/chatbot.yaml（provider: openai，默认 DeepSeek）
-#    要换通义/OpenAI，改 chatbot.yaml 里 llm.base_url / model 即可
-
-# 2) 填 API key（不写进 chatbot.yaml，走环境变量）
-cp deploy/.env.example /home/<用户>/qq-chatbot/.env
-vim /home/<用户>/qq-chatbot/.env   # 把 QQ_CHATBOT_API_KEY=sk-... 填成你的 key
-chmod 600 /home/<用户>/qq-chatbot/.env
+.venv/bin/python -m qq_chatbot qq --ws ws://127.0.0.1:3001 --config chatbot.yaml --store .chatbot
 ```
 
-- DeepSeek key 在 <https://platform.deepseek.com/api_keys> 创建，`base_url=https://api.deepseek.com/v1`。
-- 通义千问 key 在 <https://platform.qianwenai.com/home/api-keys> 创建，`base_url=https://dashscope.aliyuncs.com/compatible-mode/v1`。
+需要常驻时，以 [systemd 模板](<qq-chatbot.service>) 为基础修改用户、工作目录、Python 路径与配置路径，再安装到自己的服务环境。模板是 system service；同步脚本自动重启使用 user service，两者必须自行对齐。
 
-> 向量化固定用 `hash`（零依赖、离线），所以**不需要**装 ollama，也不需要给云端发全量历史。
-
-**备选（要完全离线时）**：本地 ollama —— `curl -fsSL https://ollama.com/install.sh | sh`，再 `ollama pull qwen2.5:7b`，`chatbot.yaml` 里 `llm.provider: ollama`。
-
-### 3.3 NapCat（机器人账号）
-
-在 Linux 主机上跑 NapCat 并登录机器人账号，开启 OneBot11 正向 WebSocket `127.0.0.1:3001`
-（Docker 推荐，端口映射 `-p 3001:3001`）：
+## 6. 增量人格与长期记忆
 
 ```bash
-docker run -d --name napcat --restart=always \
-  -p 6099:6099 -p 3001:3001 \
-  -v napcat_data:/app/napcat/config \
-  napneko/napcat
-# 首次用 docker logs napcat 查看登录二维码，手机扫码登录 <机器人账号>
-# 登录后到 WebUI http://<主机>:6099 配置网络 → WebSocket 服务端 127.0.0.1:3001
+.venv/bin/python -m qq_chatbot profile --person group:100:10001 --kind group --conversation group:100 --config chatbot.yaml
 ```
 
-> NapCat 与机器人同机时，`ws://127.0.0.1:3001` 走容器端口映射即可；不同机则填主机 IP。
+以上身份是虚构示例。`--kind` 选择风格样本，`--conversation` 限制事实来源会话。再次运行按来源指纹处理变化；原子保存前备份旧档案到 `profiles/history/`。来源消息时间与事件时间不同，来源可追溯也不证明陈述真实。历史备份不会自动清理。
 
-### 3.4 常驻服务（systemd）
+长期记忆默认 `memory.enabled: false`。启用后，QQ 根据可信事件身份区分机器人、群/私聊、提问者和模式；`/forget` 删除当前身份/模式的长期记忆和短期历史。CLI 还需 `chat --session <本地身份>`；HTTP `/chat` 没有可信身份，不使用长期 Session。记忆是明文 SQLite，应保留在机器人主机，索引推送时不要覆盖。
 
-```bash
-sudo cp deploy/qq-chatbot.service /etc/systemd/system/qq-chatbot.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now qq-chatbot
-sudo systemctl status qq-chatbot
-journalctl -u qq-chatbot -f
-```
+## 7. 管理与群成员检查
 
-### 3.5 重建人格档案（可选，数字分身模式）
+- 追踪默认关闭，启用后 `include_content` 仍默认 false；显式开启才保存问题、答案和证据正文。
+- HTTP 管理端点为 `/admin/traces` 与 `/admin/retrieval`，使用 `QQ_CHATBOT_ADMIN_TOKEN` 或配置令牌认证。在线调整只在进程中生效，不写回配置。命令示例见 [使用指南](<../docs/roadmap-usage.md>)。
+- `restrict_group_scope: true` 对群聊 QA、persona、档案、`/search` 及显式参数均限制本群；persona 也不能绕过。
+- `group_member_check` 默认 false；开启后，未知或过期成员状态拒绝受保护请求并刷新名单，用户需稍后重试。实际 OneBot 成员事件兼容性需部署验收。
 
-人格档案（说话风格 / 事实 / 观点 / 关系 / 时间线）会在 persona 模式**首次问话时自动生成**，
-也可以手动重建并落盘存档（先加载 `.env` 里的 API key 再跑）：
+## 8. 验证与数据保留
 
-```bash
-cd /home/<用户>/qq-chatbot
-set -a && . ./.env && set +a
-python3 -m qq_chatbot profile --person <persona_person> --config chatbot.yaml
-```
+先用虚构样本验证：私聊回复、群内 @ 触发、跨群拒绝、模式切换清理引用、`/forget` 仅影响当前 scope、重启后记忆可读取。检索指标可运行 `eval --demo`；模型事实正确性和人格质量需另行人工评审。
 
-- 产出 `.chatbot/profiles/<key>.json`，其中含 `timeline`（时间线记忆）。
-- 该命令生成的是「合并」档案（私聊 + 群聊一起）；运行时仍会按「私聊 / 群聊」分开各生成一份用于回答。
-- 档案依赖 LLM（事实/观点/关系/时间线），需要 API key 有效；离线风格统计与 `topics` 则从语料确定性算出。
-
----
-
-## 验证
-
-1. 给机器人账号私聊发一句话 → 应回复（qa 模式带出处）。
-2. 群里 `@机器人 问题` → 应回复；不 @ 不回复（`group_trigger: at`）。
-3. `/qa`、`/persona <key>`、`/cite`、`/help` 命令可用。
-
-## 注意
-
-- `.chatbot/` 与 `chatbot.yaml`（若含 api_key）都是敏感数据，`UMask=0077`、权限收紧。
-- 群聊检索范围 `restrict_group_scope` 依赖「机器人账号与导出账号在同一个群」——群号不同则查不到本群记录；数字分身（persona）不受此限制。
-- NapCat 属第三方协议框架，可能违反 QQ 用户协议，仅用于自己账号、自己设备。
+索引、档案及其历史备份、长期记忆、可选内容日志均属于敏感资料。只搬运必要文件并限制权限；更新索引不等于清除旧记忆或历史档案。NapCat 的使用和真实 QQ 数据库兼容性按所用环境独立验证。

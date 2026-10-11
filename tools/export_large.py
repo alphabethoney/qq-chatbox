@@ -1,7 +1,12 @@
-"""大库容错导出：group_msg_table 有页级损坏，正向/反向游标都过不去。
+"""大库导出：--since 在 SQL 层筛选 Unix 秒时间戳，兼容源库毫秒值。
 
-策略：正向按 rowid 读一段，出错后换反向按 rowid 读另一段，两段合并去重，
-把能读到的消息尽量全部导出。中间够不到的那一小段单独记录。
+--strict 在任何坏页/读取错误处失败，供增量同步使用。默认容错模式尝试
+反向游标补救，并在 JSON 索引 export.complete/errors 中明确标记不完整。
+不完整导出不能用于提交持久水位线。
+
+--resume 首次运行即启用会话 checkpoint；后续运行校验源库/参数/产物后
+跳过已完成会话的 JSON/TXT 序列化与写盘。仍需扫描、解析、分桶和排序全部
+匹配消息，且需完整哈希源库及 WAL/journal；不减少数据库读取或峰值内存。
 
 用法:
     python tools/export_large.py --db path/to/decrypted/nt_msg.db --out out
@@ -11,7 +16,11 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import hashlib
 import json
+import math
+import os
+import tempfile
 import sqlite3
 import sys
 from collections import OrderedDict
@@ -103,122 +112,216 @@ def conv_key_of(kind, m):
     return f"c2c:{ident}", str(q) if q is not None else None, u
 
 
+def _since_value(value):
+    value = float(value)
+    if not math.isfinite(value):
+        raise argparse.ArgumentTypeError("since 必须是有限 Unix 秒时间戳")
+    return value
+
+
+def read_messages(conn, table, *, since=None, reverse=False):
+    """Filter in SQL; accept QQ timestamps stored as seconds or milliseconds.
+
+    Do not CAST the timestamp column: ordinary timestamp indexes remain usable.
+    A reverse pass is only for best-effort recovery, never for committed syncs.
+    """
+    table = table.replace('"', '""')
+    sel = ",".join(f'"{c}"' for c in MSG_COLS)
+    where, params = "", ()
+    if since is not None:
+        where = (' WHERE (("40050" <= 1000000000000 AND "40050" > ?)'
+                 ' OR ("40050" > 1000000000000 AND "40050" > ?) OR "40050" IS NULL)')
+        params = (since, since * 1000)
+    order = "DESC" if reverse else "ASC"
+    return conn.execute(f'SELECT {sel} FROM "{table}"{where} ORDER BY rowid {order}', params)
+
+
+def _digest(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _file_fingerprint(path):
+    path = Path(path)
+    if not path.exists():
+        return None
+    before = path.stat()
+    digest = _digest(path)
+    after = path.stat()
+    fields = ("st_size", "st_mtime_ns", "st_ctime_ns", "st_dev", "st_ino")
+    if any(getattr(before, field) != getattr(after, field) for field in fields):
+        raise RuntimeError("源文件在 fingerprint 计算期间变化，拒绝恢复")
+    return {**{field: getattr(after, field) for field in fields}, "sha256": digest}
+
+
+def _source_fingerprint(path):
+    path = Path(path).resolve()
+    # WAL and rollback journals can change the logical database independently of
+    # the main file. SHM is transient coordination data and holds no DB pages.
+    result = {"path": str(path), "files": {suffix: _file_fingerprint(Path(str(path) + suffix))
+              for suffix in ("", "-wal", "-journal")}}
+    if result["files"][""] is None:
+        raise FileNotFoundError(path)
+    return result
+
+
+def _atomic_text(path, text):
+    path = Path(path)
+    fd, temp = tempfile.mkstemp(prefix="." + path.name + ".", suffix=".tmp", dir=path.parent)
+    temp = Path(temp)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp, path)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def _save_checkpoint(path, state):
+    _atomic_text(path, json.dumps(state, ensure_ascii=False, allow_nan=False))
+
+
+def _completed_valid(out, record, entry, artifacts):
+    if not isinstance(record, dict) or record.get("entry") != entry:
+        return False
+    digests = record.get("artifacts")
+    if not isinstance(digests, dict) or set(digests) != set(artifacts):
+        return False
+    return all((out / name).is_file() and _digest(out / name) == digests[name] for name in artifacts)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--db", required=True)
     ap.add_argument("--out", default="out")
     ap.add_argument("--format", default="json,txt")
     ap.add_argument("--names", default=None)
+    ap.add_argument("--since", type=_since_value, help="仅导出晚于此 Unix 秒时间戳的消息（SQL 过滤）")
+    ap.add_argument("--strict", action="store_true", help="任何读取失败即终止，不允许坏页导出提交同步水位线")
+    ap.add_argument("--resume", action="store_true", help="启用/恢复会话checkpoint；仍扫描全部匹配消息，仅跳过有效会话序列化与写盘")
     args = ap.parse_args()
+    formats = sorted(set(part.strip() for part in args.format.split(",") if part.strip()))
+    if not formats or any(part not in ("json", "txt") for part in formats):
+        ap.error("format 仅支持 json、txt 或 json,txt")
+    names = {}
+    names_fingerprint = None
+    if args.names:
+        names_path = Path(args.names).resolve()
+        names_text = names_path.read_text(encoding="utf-8")
+        names = {str(k): str(v) for k, v in json.loads(names_text).items()}
+        names_fingerprint = {"path": str(names_path), "sha256": hashlib.sha256(names_text.encode("utf-8")).hexdigest()}
 
-    dbp = Path(args.db)
+    dbp = Path(args.db).resolve()
+    out = Path(args.out)
+    checkpoint_path = out / ".export-checkpoint.json"
+    checkpoint = None
+    source = None
+    if args.resume:
+        source = _source_fingerprint(dbp)
+        parameters = {"formats": formats, "since": args.since, "strict": args.strict, "names": names_fingerprint}
+        if checkpoint_path.exists():
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            if checkpoint.get("version") != 1 or checkpoint.get("source") != source:
+                raise ValueError("resume 源数据库 fingerprint 不匹配，源文件已变化；请使用新的输出目录")
+            if checkpoint.get("parameters") != parameters:
+                raise ValueError("resume 导出参数不匹配；请使用原参数或新的输出目录")
+            if not isinstance(checkpoint.get("completed"), dict):
+                raise ValueError("resume checkpoint completed 无效")
+        else:
+            checkpoint = {"version": 1, "source": source, "parameters": parameters, "completed": {}, "scan_complete": False}
+        out.mkdir(parents=True, exist_ok=True)
+        checkpoint["complete"] = False
+        _save_checkpoint(checkpoint_path, checkpoint)
     conn = sqlite3.connect(f"file:{dbp.as_posix()}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
 
-    tables = dbmod.detect_message_tables(conn)
-    print("消息表:", tables, flush=True)
-
-    # 自动识别本账号 QQ 号：40013=1 的行 sender 必是自己
-    me = conn.execute(
-        'SELECT "40033" FROM c2c_msg_table WHERE "40013"=1 AND "40033" IS NOT NULL LIMIT 1'
-    ).fetchone()
-    me = str(me[0]) if me else None
+    try:
+        conn.execute("BEGIN")
+        tables = dbmod.detect_message_tables(conn)
+        print("消息表:", tables, flush=True)
+        if not tables:
+            raise RuntimeError("未识别到消息表，拒绝生成完整导出")
+        # Identity lookup is independent of since and shares the same snapshot.
+        me = None
+        for table, kind in tables:
+            if kind == "c2c":
+                quoted = table.replace('"', '""')
+                row = conn.execute(
+                    f'SELECT "40033" FROM "{quoted}" WHERE "40013"=1 AND "40033" IS NOT NULL LIMIT 1'
+                ).fetchone()
+                if row:
+                    me = str(row[0])
+                    break
+    except BaseException:
+        conn.close()
+        raise
     print("本账号 QQ:", me, flush=True)
 
-    sel = ",".join(f'"{c}"' for c in MSG_COLS)
     convs: "OrderedDict[str, dict]" = OrderedDict()
-    seen: set[int] = set()
+    seen = set()
+    errors = []
+    last_msg_time = None
 
-    def bucket(kind, m):
+    def bucket(kind, row):
+        nonlocal last_msg_time
+        m = _lean(tuple(row), me)
+        if m["time"] is not None and m["time"] > 10**12:
+            m["time"] = m["time"] / 1000
+        if m["time"] is None:
+            raise ValueError("消息缺少有效时间戳，无法可靠推进水位线")
         key, pq, pu = conv_key_of(kind, m)
-        c = convs.get(key)
-        if c is None:
-            c = {
-                "kind": kind,
-                "key": key,
-                "group_id": pq if kind == "group" else None,
-                "peer_qq": pq,
-                "peer_uid": pu,
-                "messages": [],
-            }
-            convs[key] = c
+        # IDs are only unique inside a conversation, not across tables/accounts.
+        ident = (key, m["msg_id"]) if m["msg_id"] is not None else (key, json.dumps(m, sort_keys=True))
+        if ident in seen:
+            return
+        seen.add(ident)
+        last_msg_time = max(last_msg_time, m["time"]) if last_msg_time is not None else m["time"]
+        c = convs.setdefault(key, {
+            "kind": kind, "key": key, "group_id": pq if kind == "group" else None,
+            "peer_qq": pq, "peer_uid": pu, "messages": [],
+        })
         c["messages"].append(m)
 
-    # ---- c2c 全量 ----
-    c2c_tab = next((t for t, k in tables if t == "c2c_msg_table"), [t for t, k in tables if k == "c2c"][0])
-    n = 0
-    for row in conn.execute(f'SELECT {sel} FROM "{c2c_tab}" ORDER BY rowid'):
-        m = _lean(tuple(row), me)
-        seen.add(m["msg_id"])
-        bucket("c2c", m)
-        n += 1
-    print(f"c2c 读取 {n:,} 条", flush=True)
+    try:
+        for table, kind in tables:
+            try:
+                for row in read_messages(conn, table, since=args.since):
+                    bucket(kind, row)
+            except (sqlite3.DatabaseError, ValueError) as exc:
+                if args.strict:
+                    raise
+                errors.append(f"{table}: {exc}")
+                print(f"警告: {table} 读取不完整: {exc}", flush=True)
+                try:
+                    for row in read_messages(conn, table, since=args.since, reverse=True):
+                        bucket(kind, row)
+                except (sqlite3.DatabaseError, ValueError) as reverse_exc:
+                    errors.append(f"{table} reverse: {reverse_exc}")
+    finally:
+        conn.close()
 
-    # ---- group 正向 + 反向 ----
-    # 主群聊表是 group_msg_table；discuss_msg_table 是旧版讨论组表，忽略
-    gtab = next((t for t, k in tables if t == "group_msg_table"), [t for t, k in tables if k == "group"][0])
-
-    def read_batch(cond, order, last, limit=200000):
-        sql = f'SELECT {sel} FROM "{gtab}" WHERE "40001" {cond} ? ORDER BY "40001" {order} LIMIT ?'
-        return conn.execute(sql, (last, limit)).fetchall()
-
-    fwd, bwd = 0, 0
-    last = 0
-    while True:
-        try:
-            rows = read_batch(">", "ASC", last)
-        except Exception as e:
-            print(f"正向在 rowid={last} 处结束（累计 {fwd:,} 条）: {e}", flush=True)
-            break
-        if not rows:
-            break
-        for r in rows:
-            m = _lean(tuple(r), me)
-            if m["msg_id"] in seen:
-                continue
-            seen.add(m["msg_id"])
-            bucket("group", m)
-        fwd += len(rows)
-        last = rows[-1]["40001"]
-        if fwd % 500000 < 200000:
-            print(f"  正向 {fwd:,} 条", flush=True)
-
-    max_id = conn.execute(f'SELECT max("40001") FROM "{gtab}"').fetchone()[0]
-    last = (max_id or 0) + 1
-    while True:
-        try:
-            rows = read_batch("<", "DESC", last)
-        except Exception as e:
-            print(f"反向在 rowid={last} 处结束（累计 {bwd:,} 条）: {e}", flush=True)
-            break
-        if not rows:
-            break
-        for r in rows:
-            m = _lean(tuple(r), me)
-            if m["msg_id"] in seen:
-                continue
-            seen.add(m["msg_id"])
-            bucket("group", m)
-        bwd += len(rows)
-        last = rows[-1]["40001"]
-        if bwd % 500000 < 200000:
-            print(f"  反向 {bwd:,} 条", flush=True)
-
-    conn.close()
+    if args.resume and _source_fingerprint(dbp) != source:
+        raise RuntimeError("源数据库在扫描期间变化，拒绝提交 resume 产物")
+    if checkpoint is not None:
+        if errors or not checkpoint.get("scan_complete"):
+            checkpoint["completed"] = {}
+        checkpoint.update(scan_complete=not errors, errors=errors, last_msg_time=last_msg_time)
+        _save_checkpoint(checkpoint_path, checkpoint)
 
     total = sum(len(c["messages"]) for c in convs.values())
-    print(f"\n共 {len(convs)} 个会话 / {total:,} 条消息（group 正向 {fwd:,} + 反向 {bwd:,}）", flush=True)
+    print(f"\n共 {len(convs)} 个会话 / {total:,} 条消息", flush=True)
 
     for c in convs.values():
         c["messages"].sort(key=lambda m: (m["time"] or 0, m["msg_id"] or 0))
 
-    names = {}
-    if args.names:
-        names = {str(k): str(v) for k, v in json.loads(Path(args.names).read_text(encoding="utf-8")).items()}
     for c in convs.values():
         c["title"] = names.get(c["key"], names.get(str(c["peer_qq"]), c["peer_qq"] or c["peer_uid"] or "未知"))
 
-    out = Path(args.out)
     (out / "json").mkdir(parents=True, exist_ok=True)
     (out / "txt").mkdir(parents=True, exist_ok=True)
 
@@ -238,13 +341,14 @@ def main() -> int:
             "file": f"{stem}.json",
         }
         idx.append(entry)
+        artifacts = [f"{fmt}/{stem}.{fmt}" for fmt in formats]
+        if checkpoint is not None and not errors and _completed_valid(out, checkpoint["completed"].get(key), entry, artifacts):
+            continue
 
-        if "json" in args.format:
-            (out / "json" / f"{stem}.json").write_text(
-                json.dumps({"conversation": entry, "messages": c["messages"]}, ensure_ascii=False),
-                encoding="utf-8",
-            )
-        if "txt" in args.format:
+        if "json" in formats:
+            _atomic_text(out / "json" / f"{stem}.json",
+                         json.dumps({"conversation": entry, "messages": c["messages"]}, ensure_ascii=False))
+        if "txt" in formats:
             lines = ["=" * 70, f"会话: {c['title']}", f"类型: {'群聊' if c['kind']=='group' else '私聊'}",
                      f"标识: {key}", f"消息数: {len(c['messages'])}", "=" * 70, ""]
             for m in c["messages"]:
@@ -254,23 +358,31 @@ def main() -> int:
                 t = (m["text"] or "").rstrip() or "（非文本消息）"
                 lines.extend(f"    {ln}" for ln in t.splitlines())
                 lines.append("")
-            (out / "txt" / f"{stem}.txt").write_text("\n".join(lines), encoding="utf-8", newline="\n")
+            _atomic_text(out / "txt" / f"{stem}.txt", "\n".join(lines))
 
+        if checkpoint is not None and not errors:
+            checkpoint["completed"][key] = {"entry": entry, "artifacts": {name: _digest(out / name) for name in artifacts}}
+            _save_checkpoint(checkpoint_path, checkpoint)
         if (i + 1) % 200 == 0:
             print(f"  已导出 {i+1}/{len(convs)} 个会话", flush=True)
 
-    (out / "json" / "index.json").write_text(
-        json.dumps({"conversation_count": len(idx), "message_count": total, "conversations": idx},
-                   ensure_ascii=False, indent=1),
-        encoding="utf-8",
-    )
-    with open(out / "_index.txt", "w", encoding="utf-8", newline="\n") as fh:
-        fh.write(f"QQ 聊天记录导出索引\n\n会话数: {len(idx)}   消息数: {total:,}\n\n")
-        for e in idx:
-            rng = ""
-            if e["first_time"] and e["last_time"]:
-                rng = f"  {_fmt(e['first_time'])} ~ {_fmt(e['last_time'])}"
-            fh.write(f"{e['id']:<26} {e['message_count']:>9,} 条{rng}\n")
+    if args.resume and _source_fingerprint(dbp) != source:
+        raise RuntimeError("源数据库在导出期间变化，拒绝提交 resume 索引")
+    _atomic_text(out / "json" / "index.json",
+        json.dumps({"conversation_count": len(idx), "message_count": total, "conversations": idx,
+                    "export": {"complete": not errors, "since": args.since,
+                               "last_msg_time": last_msg_time, "errors": errors}},
+                   ensure_ascii=False, indent=1))
+    index_lines = [f"QQ 聊天记录导出索引\n\n会话数: {len(idx)}   消息数: {total:,}\n\n"]
+    for e in idx:
+        rng = ""
+        if e["first_time"] and e["last_time"]:
+            rng = f"  {_fmt(e['first_time'])} ~ {_fmt(e['last_time'])}"
+        index_lines.append(f"{e['id']:<26} {e['message_count']:>9,} 条{rng}\n")
+    _atomic_text(out / "_index.txt", "".join(index_lines))
+    if checkpoint is not None:
+        checkpoint["complete"] = not errors
+        _save_checkpoint(checkpoint_path, checkpoint)
 
     print(f"\n导出完成 -> {out}", flush=True)
     return 0

@@ -56,6 +56,9 @@ class HashEmbedding(EmbeddingProvider):
 
     def __init__(self, dim: int = 256, **_) -> None:
         self.dim = int(dim)
+        if self.dim <= 0:
+            raise ValueError("embedding dim 必须为正整数")
+        self.model = "fnv1a-ngram-v1"
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         return [hash_embed(t, self.dim) for t in texts]
@@ -94,7 +97,10 @@ class OpenAIEmbedding(EmbeddingProvider):
             {"model": self.model, "input": texts},
             self.api_key,
         )
-        return [item["embedding"] for item in data["data"]]
+        items = data["data"]
+        if sorted(item.get("index", -1) for item in items) != list(range(len(texts))):
+            raise ValueError("OpenAI embedding 响应 index 缺失、重复或越界")
+        return [item["embedding"] for item in sorted(items, key=lambda item: item["index"])]
 
 
 _REGISTRY = {
@@ -111,7 +117,10 @@ def make_embedding(cfg: EmbeddingConfig) -> EmbeddingProvider:
         raise RuntimeError(
             f"未知 embedding provider: {cfg.provider!r}（可选: {', '.join(_REGISTRY)}）"
         )
-    return cls(dim=cfg.dim, model=cfg.model, base_url=cfg.base_url, api_key=cfg.api_key)
+    provider = cls(dim=cfg.dim, model=cfg.model, base_url=cfg.base_url, api_key=cfg.api_key)
+    provider.fallback_to_hash = getattr(cfg, "fallback_to_hash", False)
+    provider.hash_dim = cfg.dim
+    return provider
 
 
 def _post(url: str, payload: dict, api_key: str | None = None) -> dict:

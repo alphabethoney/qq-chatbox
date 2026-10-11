@@ -5,6 +5,12 @@ _work/
 out/
 # 聊天机器人索引与人格档案（含聊天内容）
 .chatbot/
+# 本地凭据与个性化部署配置
+.env
+.env.*
+!.env.example
+*.local.yaml
+*.local.json
 # Python 缓存
 __pycache__/
 *.pyc

@@ -1,0 +1,5 @@
+[
+  {"query": "项目会议时间", "gold_turn_ids": ["demo-meeting"], "filters": {"conversation": "group:100"}},
+  {"query": "午餐聚餐", "gold_turn_ids": ["demo-lunch"], "filters": {"person_qq": "10001"}},
+  {"query": "周末读书", "gold_turn_ids": ["demo-book"]}
+]

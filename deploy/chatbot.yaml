@@ -1,6 +1,7 @@
 # 主机运行时配置：云端 API（LLM 生成）+ 本机 hash（向量化）。
-# API key 不要写在这个文件里——用环境变量 QQ_CHATBOT_API_KEY（systemd 从 .env 加载），
-# 或直接设 OPENAI_API_KEY。见 deploy/README.md。
+# API key 不要写在这个文件里——用环境变量 QQ_CHATBOT_API_KEY；
+# systemd 不会自动加载 .env，需自行配置 EnvironmentFile。见 deploy/README.md。
+# 以下身份均为虚构示例；替换为自己授权的数据。
 
 llm:
   provider: openai          # OpenAI 兼容端点
@@ -17,9 +18,10 @@ llm:
 embedding:
   provider: hash            # 本机 hash：零依赖、离线、与读取机 build 时一致
   dim: 256
+  fallback_to_hash: false   # 语义后端故障时是否整体切到独立 hash 空间；默认关闭
 
 store:
-  dir: /home/<用户>/qq-chatbot/.chatbot
+  dir: .chatbot             # 相对机器人进程工作目录；也可用 --store 指定
 
 retrieval:
   top_k: 8
@@ -29,6 +31,22 @@ retrieval:
 session:
   max_turns: 12
 
+# 长期摘录非事实认证；QQ 自动隔离身份，CLI 还需 chat --session <本地身份>。
+# /forget 删除当前身份/模式记忆；HTTP /chat 不启用长期 Session。
+memory:
+  enabled: false
+  half_life_days: 30
+  ttl_days: 180
+  max_entries: 500
+  top_k: 4
+
+# 默认不记录日志；即使启用，include_content=false 也不保存聊天正文。
+observability:
+  enabled: false
+  include_content: false
+  max_bytes: 5000000
+  admin_token: ""           # 推荐环境变量 QQ_CHATBOT_ADMIN_TOKEN；无令牌拒绝管理请求
+
 bridge:
   ws_url: ws://127.0.0.1:3001
   mode: persona            # 数字分身；群内发 /qa 可切历史问答
@@ -36,7 +54,10 @@ bridge:
   persona_name: ""          # 数字分身的自称（空则用 QQ 号）
   merge_group_into_private: true   # 私聊人格：知识融入群聊内容，语气仍用私聊
   group_trigger: at        # at | all
-  restrict_group_scope: true
+  restrict_group_scope: true  # QA/persona/档案/search/显式参数均不得跨群
+  group_member_check: false   # 开启后未知/过期成员状态拒绝请求，刷新名单后重试
+  group_member_cache_ttl: 300
+  group_member_request_timeout: 10
   rate_limit_per_min: 30
   split_sentences: true    # 回复按句拆成多条逐条发出（更像真人）
   max_sentences: 6

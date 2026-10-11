@@ -205,6 +205,37 @@ def test_config(tmp: Path) -> None:
     check("JSON 配置加载", cfg3.embedding.provider == "openai" and cfg3.embedding.dim == 1536)
 
 
+def test_redact():
+    from qq_chatbot.redact import Redactor, RedactingLLM
+
+    r = Redactor(["张三", "李四", "爱丽丝"])
+    t = "张三和李四说：加我 1234567890，邮箱 test@example.com，手机 13900000000"
+    rt = r.redact(t)
+    check("脱敏替换昵称", "张三" not in rt and "李四" not in rt, rt)
+    check("脱敏替换号码", "1234567890" not in rt and "13900000000" not in rt, rt)
+    check("脱敏替换邮箱", "test@example.com" not in rt, rt)
+    back = r.unredact(rt)
+    check("还原昵称", "张三" in back and "李四" in back, back)
+    check("不还原号码", "1234567890" not in back, back)
+
+    class _Fake:
+        name = "openai"
+
+        def __init__(self):
+            self.seen = None
+
+        def chat(self, msgs, *, temperature=0.4, max_tokens=1024):
+            self.seen = msgs
+            return "和〔名0〕好"
+
+    f = _Fake()
+    w = RedactingLLM(f, Redactor(["张三"]))
+    out = w.chat([{"role": "user", "content": "张三在吗"}])
+    check("LLM 收到脱敏内容", "张三" not in f.seen[0]["content"], str(f.seen))
+    check("LLM 回复还原昵称", "张三" in out, out)
+    check("包装器保留 name", w.name == "openai", w.name)
+
+
 def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="qqcb_test_"))
     try:
@@ -215,6 +246,7 @@ def main() -> int:
         test_prompt()
         test_answer(tmp)
         test_config(tmp)
+        test_redact()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

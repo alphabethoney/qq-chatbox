@@ -17,17 +17,17 @@
 | 主库位置 | `<QQ数据目录>/<账号>/nt_qq/nt_db/nt_msg.db` |
 | 加密方式 | SQLCipher（AES-256-CBC + HMAC-SHA1，PBKDF2-HMAC-SHA512/4000） |
 | 文件结构 | 1024 字节明文头部 + 4096 字节页，每页尾部保留 48 字节 |
-| 密钥 | 16 字符 ASCII 口令，**不落盘**，且**无法本地推导** |
+| 密钥 | 运行时获取的数据库口令；插件可显式保存，不能仅凭数据库文件推导 |
 
-关键结论（来自 [QQDecrypt](https://github.com/QQBackup/QQDecrypt) 的逆向研究与 NapCat 源码）：
+根据 [QQDecrypt](https://github.com/QQBackup/QQDecrypt) 的逆向研究与 NapCat 实现，口令获取与登录后的数据库初始化有关。可在有权限的已登录 QQ 会话中通过 NapCat 获取口令；口令是否跨登录或版本保持不变不作保证，应以目标数据库的解密校验为准。
 
-> 数据库密钥是登录后，用数据库头里的 `key_meta` 发 OIDB `0xcde` 指令从服务器**换回来**的，账号固定、多次登录不变。因此单纯拿到数据库文件无法离线解密，必须借助一个已登录的 QQ 会话。
-
-**NapCat 正好在登录时自动截获了这个口令**，这就是本项目推荐它的原因。
+**NapCat 可在登录时获取数据库口令**，具体 API 与版本兼容性需以所用版本验证。
 
 ---
 
 ## 快速开始
+
+以下账号、姓名、对话及路径均为虚构示例或占位符，使用时替换为自己的授权数据；示例不包含真实聊天信息。
 
 ### 第 1 步：用 NapCat 拿到密钥
 
@@ -41,7 +41,7 @@ const passphrase = dbApi.getPassphraseBuffer()?.toString('ascii'); // 16 字符 
 
 > 或者让 NapCat 直接解密成明文库，跳过本工具的 `decrypt`：
 > ```js
-> const plain = dbApi.decryptDatabase('nt_msg.db', 'D:/out/nt_msg_plain.db');
+> const plain = dbApi.decryptDatabase('nt_msg.db', 'out/nt_msg_plain.db');
 > ```
 
 ### 第 2 步：解密 + 导出
@@ -143,7 +143,9 @@ out/
 ```
 
 增量进度记录在 `out/.export_state.json`；删除它即可重新全量导出。
-配合 QQ 持续写入时，每轮只需重新解密一次（密钥已缓存）即可拿到新消息。
+`watch` 读取指定的明文库，不会自动重新解密正在运行的 QQ 数据库。要同步新消息，需先取得一致的数据库快照并更新明文库。
+
+机器人索引的时间戳增量同步见 [Roadmap 使用指南](<docs/roadmap-usage.md>)：支持水位线与重读窗口，但当前仍全量解密、重建索引；它与此处按消息 ID 的 `--since` 不是同一参数语义。
 
 ---
 
@@ -154,13 +156,11 @@ out/
 * 去掉开头 1024 字节的 NTQQ 自定义头部；
 * 口令经 `PBKDF2-HMAC-SHA512(口令, 盐, 4000)` 派生为 32 字节 AES 密钥，盐值明文存放在第 1 页开头；
 * 保留区大小**自动探测**（拿第 1 页试几个候选值，看哪个能还原出合法 SQLite 页头）；
-* **流式解密**：按页读 → 按页解密 → 按页写，内存占用恒定（按页处理，不以私人语料规模作为性能依据），不整库进内存；
-* `-wal` 里尚未落盘的页面也会被解密合并，不必为了最新消息先退出 QQ；
-* 输出前用 `PRAGMA quick_check` 自检。
+* **流式解密**：按页读 → 按页解密 → 按页写，避免将整个主库载入内存；不承诺固定峰值内存；
+* WAL 合并已通过标准 SQLite 与合成加密样本测试；真实 QQ 版本及持续写入期间的一致性仍待验收。同步工具当前跳过 WAL，因此仅在 WAL 中的消息可能暂时不可见；
+* 解密结果执行 `PRAGMA quick_check`，同步工具在检查失败时拒绝推进水位线。
 
-一个实测出的坑：SQLite 头部的「保留区字节」（偏移 20）**不等于** SQLCipher 的保留区大小
-（实测分别是 `80` 和 `48`）。若强行把两者改成相等，SQLite 算出的 `usableSize` 会偏大，
-读取溢出页时就会读坏。因此本工具保留解密出来的原值。
+SQLite 页头里的「保留区字节」与加密页尾布局应分别处理，不能假定数值相同。版本兼容性以合成测试和目标数据库校验为准。
 
 ### 消息体解析（`qq_exporter/wire.py` + `qq_exporter/db.py`）
 
@@ -201,15 +201,17 @@ MsgBody { repeated MsgContent content = 40800 }
 
 ## 验证情况
 
-`python tests/run_tests.py`（46 项，全部通过）覆盖：
+使用合成数据库与虚构聊天样本进行离线验证：
 
-* Protobuf wire 解析边界（varint 极值、深层嵌套、repeated、二进制过滤）；
-* SQLCipher 往返：自造真实格式的加密文件 → 解密 → 逐字节比对，
-  含保留区探测、HMAC 校验、错误密钥必须失败；
-* 导出链路：会话归类（私聊/群聊、收/发方向）、JSON/TXT 产物、名称映射、异常输入不崩溃。
+```powershell
+python tests/run_tests.py
+python -m unittest discover -s tests -p "test_*.py"
+python -m qq_chatbot eval --demo --dataset tests/fixtures/retrieval_cases.json --output _work/eval.json
+```
 
-真实数据验证细节与私人语料规模不公开；使用授权数据自行验证。`global` 目录下的 `login.db` / `sign.db`
-用硬编码口令 `BD156D6710D54D8782F4` 即可离线解开（该口令公开在 `wrapper.node` 中）。
+覆盖 Protobuf 边界、SQLCipher 往返与错误密钥、JSON/TXT 导出、索引与作用域、时间线、长期记忆和管理接口。测试数量及通过结果以本次实际运行输出为准。
+
+合成测试不代表真实 QQ WAL、所有数据库版本或云端模型效果已验收。各项实现与限制见 [Roadmap](<docs/ROADMAP.md>)，命令示例见 [使用指南](<docs/roadmap-usage.md>)。
 
 ---
 
@@ -279,7 +281,7 @@ retrieval: { top_k: 8, vector_weight: 0.7, min_score: 0.35 }
 
 也支持 OpenAI 兼容端点（`provider: openai`，配 `api_key`，可接通义/DeepSeek 等）。完整结构见 [`docs/chatbot-structure.md`](docs/chatbot-structure.md)。
 
-> 注意：云端后端会把聊天内容发送到远程 API；本地 ollama 模式全程离线。索引与人格档案落在 `.chatbot/`，已被 `.gitignore` 排除。
+> 注意：云端后端会把聊天内容发送到远程 API。默认开启**发送前脱敏**（`llm.redact: true`）——把语料里的真实昵称、QQ 号、手机号、邮箱替换成占位符再上云，回复后再还原昵称，云端拿不到真实身份；QQ 号/手机/邮箱不回填。本地 ollama 模式全程离线。索引与人格档案落在 `.chatbot/`，已被 `.gitignore` 排除。
 
 ### 接入 QQ（群聊 + 私聊）
 
@@ -305,7 +307,7 @@ pip install websocket-client
 
 ```powershell
 # 安装（把插件目录复制到 NapCat 插件目录）
-robocopy tools\napcat-plugin-db-passphrase "D:\NapCat\napcat\plugins\db-passphrase" /E
+robocopy tools\napcat-plugin-db-passphrase "<NapCat插件目录>\db-passphrase" /E
 # 启动 NapCat，用「导出账号」扫码登录 → 控制台打印
 #   [db-passphrase] 数据库口令 passphrase = XXXXXXXXXXXXXXXX
 # 也会保存到 plugins\db-passphrase\passphrase.json
@@ -317,7 +319,13 @@ robocopy tools\napcat-plugin-db-passphrase "D:\NapCat\napcat\plugins\db-passphra
 .\.venv\Scripts\python.exe -m qq_exporter all --qq <导出账号> --passphrase "<16字符口令>" --out out
 ```
 
-> **导出账号 ≠ 机器人账号**：口令是「账号固定」的，只需在导出账号登录时抓一次；之后 NapCat 可切换/重登成机器人账号跑 `qq`。两阶段互不影响。
+> **导出账号与机器人账号可以不同**：解密时必须使用与目标数据库匹配的口令，并检查解密结果；不要假定口令永久不变或一次获取后一直有效。机器人运行阶段只需索引和相应服务配置。
+
+### 增量、评测、长期记忆与管理
+
+当前实现提供时间戳增量同步、可持久化语义向量、离线检索评测、带来源的增量时间线、可选长期记忆、管理 API 以及群成员检查。长期记忆、追踪日志和群成员检查均默认关闭；HTTP `/chat` 没有可信用户身份，因此不启用长期记忆。
+
+具体配置、`chat --session`、`/forget`、评测基线、导出 `--resume` 和管理 API 示例见 [Roadmap 使用指南](<docs/roadmap-usage.md>)。R6 已实现会话级导出恢复；真实 QQ WAL 兼容性仍待验收，解密续传与并发导出未实现。
 
 ---
 

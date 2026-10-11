@@ -21,6 +21,7 @@ class LLMConfig:
     api_key: str = ""
     temperature: float = 0.4
     max_tokens: int = 1024
+    redact: bool = True           # 发送前脱敏：真实昵称/QQ号/手机/邮箱替换成占位符
 
 
 @dataclass
@@ -30,6 +31,7 @@ class EmbeddingConfig:
     base_url: str = ""
     api_key: str = ""
     dim: int = 256
+    fallback_to_hash: bool = False
 
 
 @dataclass
@@ -51,6 +53,23 @@ class SessionConfig:
 
 
 @dataclass
+class MemoryConfig:
+    enabled: bool = False
+    half_life_days: float = 30.0
+    ttl_days: float = 180.0
+    max_entries: int = 500
+    top_k: int = 4
+
+
+@dataclass
+class ObservabilityConfig:
+    enabled: bool = False
+    include_content: bool = False
+    max_bytes: int = 5_000_000
+    admin_token: str = ""
+
+
+@dataclass
 class BridgeConfig:
     ws_url: str = "ws://127.0.0.1:3001"   # NapCat 正向 WebSocket 地址
     self_id: int = 0                       # 机器人 QQ 号（0=从 lifecycle 事件自动获取）
@@ -63,6 +82,9 @@ class BridgeConfig:
     rate_limit_per_min: int = 30           # 每会话每分钟回复上限（0=不限）
     split_sentences: bool = False          # 回复按句子拆成多条逐条发出
     max_sentences: int = 6                 # 拆句后最多发几条
+    group_member_check: bool = False
+    group_member_cache_ttl: float = 300.0
+    group_member_request_timeout: float = 10.0
 
 
 @dataclass
@@ -73,6 +95,8 @@ class Config:
     retrieval: RetrievalConfig = field(default_factory=RetrievalConfig)
     session: SessionConfig = field(default_factory=SessionConfig)
     bridge: BridgeConfig = field(default_factory=BridgeConfig)
+    memory: MemoryConfig = field(default_factory=MemoryConfig)
+    observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
 
     def to_dict(self) -> dict:
         return {
@@ -82,6 +106,8 @@ class Config:
             "retrieval": _dc_dict(self.retrieval),
             "session": _dc_dict(self.session),
             "bridge": _dc_dict(self.bridge),
+            "memory": _dc_dict(self.memory),
+            "observability": _dc_dict(self.observability),
         }
 
 
@@ -119,6 +145,8 @@ _ENV_MAP = {
     "QQ_CHATBOT_EMBEDDING_MODEL": ("embedding", "model"),
     "QQ_CHATBOT_EMBEDDING_BASE_URL": ("embedding", "base_url"),
     "QQ_CHATBOT_EMBEDDING_DIM": ("embedding", "dim"),
+    "QQ_CHATBOT_EMBEDDING_API_KEY": ("embedding", "api_key"),
+    "QQ_CHATBOT_ADMIN_TOKEN": ("observability", "admin_token"),
     "QQ_CHATBOT_BRIDGE_WS": ("bridge", "ws_url"),
     "QQ_CHATBOT_BRIDGE_MODE": ("bridge", "mode"),
 }
@@ -148,6 +176,8 @@ def load_config(path: str | Path | None = None, overrides: dict | None = None) -
         _apply_section(cfg.retrieval, data.get("retrieval"), env_prefix="", overrides=overrides.get("retrieval"))
         _apply_section(cfg.session, data.get("session"), env_prefix="", overrides=overrides.get("session"))
         _apply_section(cfg.bridge, data.get("bridge"), env_prefix="", overrides=overrides.get("bridge"))
+        _apply_section(cfg.memory, data.get("memory"), env_prefix="", overrides=overrides.get("memory"))
+        _apply_section(cfg.observability, data.get("observability"), env_prefix="", overrides=overrides.get("observability"))
         store = data.get("store") or {}
         if store.get("dir"):
             cfg.store.dir = Path(store["dir"])
@@ -165,11 +195,23 @@ def load_config(path: str | Path | None = None, overrides: dict | None = None) -
         setattr(target, attr, val)
 
     # CLI 覆盖（顶层 keys: llm/embedding/retrieval/session/store/bridge）
-    for section in ("llm", "embedding", "retrieval", "session", "bridge"):
+    for section in ("llm", "embedding", "retrieval", "session", "bridge", "memory", "observability"):
         if section in overrides and isinstance(overrides[section], dict):
             _apply_section(getattr(cfg, section), overrides[section], env_prefix="", overrides=None)
 
     _coerce_numbers(cfg)
+    for obj, names in ((cfg.llm, ("redact",)),
+                       (cfg.embedding, ("fallback_to_hash",)),
+                       (cfg.memory, ("enabled",)),
+                       (cfg.observability, ("enabled", "include_content")),
+                       (cfg.bridge, ("merge_group_into_private", "restrict_group_scope", "split_sentences", "group_member_check"))):
+        for name in names:
+            value = getattr(obj, name)
+            if isinstance(value, str) and value.lower() in ("true", "false"):
+                value = value.lower() == "true"
+            if not isinstance(value, bool):
+                raise ValueError(f"{name} 必须为 true 或 false")
+            setattr(obj, name, value)
     return cfg
 
 
@@ -179,7 +221,9 @@ def _coerce_numbers(cfg: Config) -> None:
         (cfg.embedding, ("dim",)),
         (cfg.retrieval, ("top_k", "vector_weight", "min_score")),
         (cfg.session, ("max_turns",)),
-        (cfg.bridge, ("self_id", "rate_limit_per_min", "max_sentences")),
+        (cfg.bridge, ("self_id", "rate_limit_per_min", "max_sentences", "group_member_cache_ttl", "group_member_request_timeout")),
+        (cfg.memory, ("half_life_days", "ttl_days", "max_entries", "top_k")),
+        (cfg.observability, ("max_bytes",)),
     ):
         for a in attrs:
             try:

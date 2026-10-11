@@ -67,7 +67,10 @@ class PersonaProfile:
     opinions: list[dict] = field(default_factory=list)
     relationships: list[dict] = field(default_factory=list)
     topics: list[str] = field(default_factory=list)
-    timeline: list[dict] = field(default_factory=list)   # {time, event} 按时间先后
+    timeline: list[dict] = field(default_factory=list)   # 带来源的历史事实
+    kind: str | None = None
+    conversation: str | None = None
+    timeline_state: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -83,4 +86,5 @@ class Citation:
 class Answer:
     text: str
     citations: list[Citation] = field(default_factory=list)
-    grounded: bool = True  # qa 模式下是否有检索证据支撑
+    grounded: bool = True  # 是否有达到阈值的检索证据，不代表事实已认证
+    trace_id: str = ""

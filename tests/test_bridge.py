@@ -116,7 +116,7 @@ def main() -> int:
         out = rt.handle(private_event("/persona c2c:10001"), self_id=SELF)
         check("/persona 切换", out and "c2c:10001" in out[0].params["message"], str(out))
         out = rt.handle(private_event("/cite"), self_id=SELF)
-        check("/cite 显示上一条出处", out and "周末一起吃饭" in out[0].params["message"], str(out))
+        check("/cite 模式切换后不保留旧出处", out and "尚无出处" in out[0].params["message"], str(out))
         out = rt.handle(private_event("/cite", user_id=99999), self_id=SELF)
         check("/cite 无出处提示", out and "尚无出处" in out[0].params["message"], str(out))
         out = rt.handle(private_event("/help"), self_id=SELF)
