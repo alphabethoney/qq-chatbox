@@ -67,6 +67,7 @@ class BridgeRuntime:
         self.cfg = config.bridge
         self.modes: dict[str, str] = {}
         self.persons: dict[str, str] = {}
+        self.persona_kinds: dict[str, str] = {}   # 每会话人格类型覆盖：c2c / group
         self.sessions: dict[str, Session] = {}
         self.last_cites: dict[str, list] = {}
         self._hits: dict[str, list[float]] = defaultdict(list)
@@ -113,8 +114,12 @@ class BridgeRuntime:
                                "persona 模式需要先指定说话人：发送 /persona <key>")]
 
         session = self.sessions.setdefault(key, Session(self.bot.config.session.max_turns))
-        # persona 模式下，私聊用「私聊人格」、群聊用「群聊人格」
-        persona_kind = ("group" if msg_type == "group" else "c2c") if mode == "persona" else None
+        # persona 模式：优先用会话内 /kind 覆盖，否则私聊用「私聊人格」、群聊用「群聊人格」
+        if mode == "persona":
+            override = self.persona_kinds.get(key)
+            persona_kind = override if override in ("c2c", "group") else ("group" if msg_type == "group" else "c2c")
+        else:
+            persona_kind = None
         try:
             if msg_type == "group" and self.cfg.restrict_group_scope:
                 ans = self.bot.answer(text, mode=mode, person=person, session=session,
@@ -181,6 +186,20 @@ class BridgeRuntime:
             self.modes[key] = "persona"
             self.persons[key] = parts[1]
             return reply(f"已切换到数字分身：{parts[1]}")
+        if cmd == "kind":
+            if len(parts) < 2:
+                return reply("用法：/kind c2c | group | auto")
+            v = parts[1].lower()
+            if v in ("c2c", "私聊", "private"):
+                self.persona_kinds[key] = "c2c"
+                return reply("已切换为【私聊人格】")
+            if v in ("group", "群聊"):
+                self.persona_kinds[key] = "group"
+                return reply("已切换为【群聊人格】")
+            if v in ("auto", "自动"):
+                self.persona_kinds.pop(key, None)
+                return reply("已切换为自动（私聊走私聊人格、群聊走群聊人格）")
+            return reply("未知：/kind c2c | group | auto")
         if cmd in ("cite", "出处"):
             cites = self.last_cites.get(key)
             if not cites:
@@ -188,5 +207,5 @@ class BridgeRuntime:
             lines = [f"· {c.conversation_key} {c.time_str} {c.speaker}: {c.text}" for c in cites]
             return reply("上一条出处：\n" + "\n".join(lines))
         if cmd in ("help", "帮助"):
-            return reply("命令：/qa 切换历史问答 · /persona <key> 切换数字分身 · /cite 出处 · /help")
+            return reply("命令：/qa 历史问答 · /persona <key> 数字分身 · /kind c2c|group|auto 切人格 · /cite 出处 · /help")
         return reply(f"未知命令：{cmd}（/help 查看）")

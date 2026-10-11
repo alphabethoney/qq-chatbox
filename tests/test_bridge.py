@@ -121,6 +121,10 @@ def main() -> int:
         check("/cite 无出处提示", out and "尚无出处" in out[0].params["message"], str(out))
         out = rt.handle(private_event("/help"), self_id=SELF)
         check("/help", out and "命令" in out[0].params["message"], str(out))
+        out = rt.handle(private_event("/kind group"), self_id=SELF)
+        check("/kind group 切换", out and "群聊人格" in out[0].params["message"], str(out))
+        out = rt.handle(private_event("/kind auto"), self_id=SELF)
+        check("/kind auto 恢复自动", out and "自动" in out[0].params["message"], str(out))
 
         print("\n== 数字分身与限流 ==")
         rt2 = make_runtime(tmp, mode="persona", persona_person="c2c:10001")
