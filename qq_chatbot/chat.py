@@ -46,7 +46,13 @@ class Chatbot:
             filters = {}
         if conversation is not None:
             filters["conversation"] = conversation
-        if kind is not None:
+        # 私聊人格可选「群聊知识融入、私聊语气保留」：检索不过滤 kind（融入群聊），人格档案仍用 c2c（保留语气）
+        merge_into_private = (
+            mode == "persona"
+            and kind == "c2c"
+            and self.config.bridge.merge_group_into_private
+        )
+        if kind is not None and not merge_into_private:
             filters["kind"] = kind
         if time_range is not None:
             filters["time_range"] = time_range

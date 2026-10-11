@@ -57,6 +57,7 @@ class BridgeConfig:
     mode: str = "qa"                       # 默认模式 qa | persona
     persona_person: str = ""               # persona 模式要模仿的说话人 key
     persona_name: str = ""                 # 数字分身的自称/昵称（空则用 QQ 号）
+    merge_group_into_private: bool = True  # 私聊人格：知识融入群聊内容，但语气仍用私聊
     group_trigger: str = "at"              # 群聊触发方式 at | all
     restrict_group_scope: bool = True      # 群聊 qa 只检索本群记录
     rate_limit_per_min: int = 30           # 每会话每分钟回复上限（0=不限）
