@@ -29,7 +29,7 @@ scp .chatbot/corpus.json .chatbot/embeddings.json .chatbot/manifest.json "<SSH�
 
 后续可使用 [同步工具](<../tools/sync_index.py>) 的 `--push --host`。它保留读取端 `out/.sync` 中的累计原始数据；远端只接收 corpus、embeddings 和剔除本地 sync 状态的 manifest，不覆盖/删除远端 profiles 或 memory。工具的远端路径与重启方式有约定（用户主目录下的部署目录、user service），不同部署布局需先核对，不能直接套用下文 system service 模板。
 
-时间戳增量仍全量解密和重建索引，重读窗口之外的迟到消息用 `--full` 补回。不要把读取端同步累计快照当作机器人必须接收的文件。
+时间戳增量在未启用差分页缓存时仍全量解密；启用缓存后仍扫描全库，索引构建仍为全量。重读窗口之外的迟到消息用 `--full` 补回。不要把读取端同步累计快照当作机器人必须接收的文件。
 
 ## 3. 主机环境与配置
 

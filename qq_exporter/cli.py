@@ -9,7 +9,11 @@ import time
 from pathlib import Path
 
 from . import __version__, keyfinder, sqlcipher
-from .collect import build_conversations, load_names
+from .collect import build_conversations, load_names, effective_self, list_conversations
+from . import db as dbmod
+from .selection import add_arguments, selection_from_args, query_plan
+from .export_state import (atomic_json, scope_payload, validate_scope, write_scope,
+                           load_checkpoint, save_checkpoint)
 from .exporters import export_json, export_txt, safe_name
 from .media import download_media
 
@@ -28,8 +32,7 @@ def _load_state(path: Path) -> dict:
 
 
 def _save_state(path: Path, state: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_json(path, state)
 
 
 # --------------------------------------------------------------------------
@@ -140,35 +143,93 @@ def cmd_schema(args) -> int:
     return 0
 
 
+def _formats(value):
+    formats = [part.strip().lower() for part in value.split(",") if part.strip()]
+    if not formats or any(part not in ("json", "txt") for part in formats):
+        raise ValueError("--format 只支持 json,txt")
+    return formats
+
+
+def _validate_export_args(args):
+    formats = _formats(args.format)
+    selection = selection_from_args(args)
+    if getattr(args, "limit", None) is not None:
+        if args.limit <= 0:
+            raise ValueError("--limit 必须大于 0")
+        if getattr(args, "incremental", False):
+            raise ValueError("--limit 不能与 --incremental/watch 一起使用，以免推进水位后遗漏消息")
+    return formats, selection
+
+
+def cmd_conversations(args) -> int:
+    entries = list_conversations(Path(args.db), kind=args.kind,
+                                 names=load_names(Path(args.names) if args.names else None),
+                                 self_qq=args.self_qq,
+                                 standard_layout=getattr(args, "standard_layout", False))
+    if args.json:
+        _p(json.dumps(entries, ensure_ascii=False, indent=2))
+    else:
+        _p("会话键\t名称\t消息数\t最早时间(Unix秒)\t最晚时间(Unix秒)\t未知时间数")
+        for entry in entries:
+            _p("\t".join(str(entry[key]) if entry[key] is not None else "unknown"
+                         for key in ("key", "title", "message_count", "first_time", "last_time", "unknown_time_count")))
+    return 0
+
+
 def cmd_export(args) -> int:
     db_path = Path(args.db)
     out_dir = Path(args.out)
-    formats = [f.strip().lower() for f in args.format.split(",") if f.strip()]
-    names = load_names(Path(args.names) if args.names else None)
-
-    # 增量：读取状态文件得到每个消息表的起点；--since 可手动覆盖起点
-    min_ids: dict[str, int] = {}
-    state_path = out_dir / ".export_state.json"
-    if args.incremental:
-        state = _load_state(state_path)
-        min_ids = {str(k): int(v) for k, v in state.get("last_ids", {}).items()}
-    if args.since is not None:
-        min_ids = {k: args.since for k in min_ids} or {"*": args.since}
-
-    meta, conversations = build_conversations(
-        db_path,
-        include_content=args.include_content,
-        names=names,
-        limit=args.limit,
-        min_ids=min_ids,
-        progress=_p,
-    )
+    formats, selection = _validate_export_args(args)
+    conn = dbmod.connect(db_path)
+    try:
+        conn.execute("BEGIN")
+        tables = [(t, k) for t, k in dbmod.detect_message_tables(conn) if selection.matches_kind(k)]
+        identity = effective_self(conn, tables, selection) if selection.active else None
+        scope = scope_payload(db_path, selection, identity, artifacts={
+            "formats": sorted(set(formats)), "single_json": bool(args.single_json), "writer": "regular"})
+        min_ids: dict[str, int] = {}
+        state_path = out_dir / ".export_state.json"
+        if args.incremental:
+            min_ids = load_checkpoint(state_path, scope, active=selection.active)
+        if args.since is not None:
+            min_ids = {"*": args.since}
+        if getattr(args, "explain_query", False):
+            plans = []
+            for table, kind in tables:
+                columns = dbmod.resolve_columns(conn, table)
+                minimum = min_ids.get("*", min_ids.get(table))
+                if minimum is not None and "msg_id" not in columns:
+                    raise ValueError(f"表 {table} 缺少消息 ID 列，不能应用 --since/增量水位")
+                plans.append({"table": table, "kind": kind, **query_plan(
+                    conn, table, kind, columns, selection, min_id=minimum, self_qq=identity)})
+            inference = selection.self_qq is None and any(k == "c2c" for _, k in tables)
+            _p(json.dumps({"selection": selection.to_dict(), "effective_self_qq": identity,
+                           "identity_inference": {"performed": inference, "may_scan_metadata": inference},
+                           "queries": plans}, ensure_ascii=False, indent=2))
+            return 0
+        validate_scope(out_dir, scope, active=selection.active)
+        names = load_names(Path(args.names) if args.names else None)
+        meta, conversations = build_conversations(
+            db_path,
+            include_content=args.include_content,
+            names=names,
+            limit=getattr(args, "limit", None),
+            min_ids=min_ids,
+            progress=_p,
+            selection=selection,
+            self_qq=identity,
+            connection=conn,
+        )
+    finally:
+        conn.close()
+    if selection.active:
+        meta["selection"] = selection.to_dict()
+        meta["effective_self_qq"] = identity
     _p(f"共 {meta['conversation_count']} 个会话 / {meta['message_count']} 条消息")
-    if not conversations:
-        _p("没有可导出的消息")
-        return 0
+    write_scope(out_dir, scope, active=selection.active)
 
     # 媒体下载
+    media_failed = False
     if args.media:
         from .media import build_local_index
 
@@ -212,6 +273,9 @@ def cmd_export(args) -> int:
             f"跳过 {stats['skipped']} / 失败 {stats['failed']}"
         )
 
+        media_failed = stats["failed"] > 0
+        meta["media_complete"] = not media_failed
+
     if "json" in formats:
         export_json(
             conversations,
@@ -226,14 +290,19 @@ def cmd_export(args) -> int:
         _p(f"TXT 已写入 {out_dir / 'txt'}")
 
     # 更新增量状态
-    if args.incremental:
-        _save_state(state_path, {"last_ids": meta.get("last_ids", {})})
+    if media_failed:
+        _p("本轮媒体下载不完整，增量水位未推进")
+        return 1
+    if args.incremental and meta["message_count"]:
+        save_checkpoint(state_path, scope, meta.get("last_ids", {}))
         _p(f"增量状态已更新: {meta.get('last_ids')}")
     return 0
 
 
 def cmd_watch(args) -> int:
     args.incremental = True
+    if getattr(args, "explain_query", False):
+        return cmd_export(args)
     _p(f"定时增量导出：每 {args.interval} 秒一轮，Ctrl+C 退出")
     while True:
         try:
@@ -246,6 +315,9 @@ def cmd_watch(args) -> int:
 
 
 def cmd_all(args) -> int:
+    if getattr(args, "explain_query", False):
+        raise ValueError("all --explain-query 不执行密钥提取或解密；请使用 export --db <明文库> --explain-query")
+    _validate_export_args(args)
     account = args.qq
     if not account:
         account, _ = keyfinder.find_main_db()
@@ -380,7 +452,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-segments", action="store_true", help="JSON 中不写消息片段")
     p.add_argument("--include-content", action="store_true", help="JSON 中附带原始字段树")
     p.add_argument("--names", help="会话名称映射 JSON")
-    p.add_argument("--limit", type=int, help="只导出前 N 条消息（调试用）")
+    p.add_argument("--limit", type=int, help="匹配结果前 N 条（调试，不能与 --incremental 同用）")
     p.add_argument("--media", action="store_true", help="下载图片/文件/语音/视频/表情到 out/media/")
     p.add_argument("--media-dir", help="QQ 的 nt_data 缓存目录（默认从消息里的路径自动推导）")
     p.add_argument("--napcat", help="NapCat HTTP 地址（如 http://127.0.0.1:6099），旧媒体 rkey 过期时换新直链")
@@ -431,13 +503,28 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--allow-wal", action="store_true", help="忽略 -wal 提示")
     p.set_defaults(func=cmd_all)
 
+    for command in ("export", "watch", "all"):
+        add_arguments(sub.choices[command])
+    sub.choices["watch"].add_argument("--limit", type=int)
+
+    p = sub.add_parser("conversations", help="列出会话目录（不读取消息正文）")
+    p.add_argument("--db", required=True)
+    p.add_argument("--kind", choices=("group", "c2c"))
+    p.add_argument("--names")
+    p.add_argument("--self-qq")
+    p.add_argument("--standard-layout", action="store_true")
+    p.add_argument("--json", action="store_true", help="输出 JSON 数组")
+    p.set_defaults(func=cmd_conversations)
     return ap
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except ValueError as exc:
+        parser.error(str(exc))
 
 
 if __name__ == "__main__":

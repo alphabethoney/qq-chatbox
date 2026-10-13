@@ -28,6 +28,7 @@ import sqlite3
 import time
 
 from . import sqlcipher as sc
+from . import integrity as scoped_integrity
 
 _PAGE = sc.PAGE_SIZE
 _SIDECARS = ("-wal", "-shm", "-journal")
@@ -177,13 +178,15 @@ def _verify_source(fin, src, stamp, sides, header, conn, total):
         raise ValueError("源文件或 sidecar 在读取期间发生变化；请使用稳定的离线快照")
 
 
-def _update(src, root, enc_key, reserve, progress, force_rebuild):
+def _update(src, root, enc_key, reserve, progress, force_rebuild, policy, source_identity_path):
     plain = root / "plain.db"
     conn = _connect(root / "metadata.sqlite3")
     try:
         recovered = _recover(conn, plain)
         row = conn.execute("SELECT value FROM state WHERE id=1").fetchone()
         previous = json.loads(row[0]) if row else None
+        if previous and not force_rebuild and any(previous.get(k) != v for k, v in policy.items()):
+            raise ValueError("缓存 validation policy/conversation 不兼容；需要 force_rebuild=True")
         if previous is None and plain.exists():
             raise ValueError("缓存缺少元数据，拒绝覆盖现有明文文件")
         sides = _sidecars(src)
@@ -210,11 +213,10 @@ def _update(src, root, enc_key, reserve, progress, force_rebuild):
                 raise ValueError("第 1 页 HMAC 校验失败：密钥或布局不匹配")
             salt = first[:sc.SALT_SIZE]
             hmac_key = sc.derive_hmac_key(enc_key, salt)
-            identity = hashlib.sha256(os.path.normcase(str(src.resolve())).encode("utf-8")
-                                      + b"\0" + header + salt + str(reserve).encode()).hexdigest()
+            identity = scoped_integrity.source_identity(source_identity_path or src, header, salt, reserve)
             key_id = hmac.new(enc_key, b"qq-exporter-cache-key-v1\0" + salt, hashlib.sha256).hexdigest()
             current = {"version": 1, "source_identity": identity, "key_fingerprint": key_id,
-                       "reserve": reserve, "pages": total}
+                       "reserve": reserve, "pages": total, **policy}
             rebuilt = force_rebuild or previous is None or any(
                 previous.get(k) != current[k] for k in ("version", "source_identity", "key_fingerprint", "reserve")
             ) or not plain.exists()
@@ -225,6 +227,7 @@ def _update(src, root, enc_key, reserve, progress, force_rebuild):
                 raise ValueError("缓存明文长度损坏；请显式重建")
             # No writes to plaintext until the entire durable preparation commits.
             changed = reused = journal_bytes = written = 0
+            zero_pages = []
             old_fh = plain.open("rb") if existed else None
             try:
                 conn.execute("BEGIN IMMEDIATE")
@@ -239,11 +242,14 @@ def _update(src, root, enc_key, reserve, progress, force_rebuild):
                         encrypted = fin.read(_PAGE)
                         if len(encrypted) != _PAGE:
                             raise ValueError("源页面在读取期间发生变化")
+                        if not any(encrypted):
+                            zero_pages.append(pg)
                         cipher_hash = _digest(encrypted)
                         if not rebuilt and known and old is not None and cipher_hash == known[0]:
                             reused += 1
                         else:
-                            decoded = sc._decode_checked_page(encrypted, enc_key, pg, reserve, hmac_key, salt)
+                            decoded = sc._decode_checked_page(encrypted, enc_key, pg, reserve, hmac_key, salt,
+                                                              allow_zero=policy["integrity_mode"] == "selected")
                             conn.execute("INSERT INTO changes VALUES(?,?,?,?,?)", (pg, old, decoded, cipher_hash, _digest(decoded)))
                             changed += 1
                             journal_bytes += len(old or b"") + len(decoded)
@@ -300,8 +306,11 @@ def _update(src, root, enc_key, reserve, progress, force_rebuild):
                             written += len(fixed)
                             _sync(fout)
                         integrity = sc.quick_check(plain)
-                if integrity != "ok":
-                    raise ValueError(f"缓存 SQLite quick_check 失败: {integrity}")
+                report = scoped_integrity.inspect_integrity(
+                    plain, policy=policy, full_result=integrity, zero_pages=zero_pages)
+                if not report["accepted"]:
+                    raise ValueError(f"缓存 SQLite quick_check/selected integrity 失败: {report}")
+                current["zero_pages"] = zero_pages
                 _verify_source(fin, src, stamp, sides, header, conn, total)
                 _checkpoint("before_commit")
                 with conn:
@@ -322,19 +331,24 @@ def _update(src, root, enc_key, reserve, progress, force_rebuild):
                        "integrity": integrity, "rebuilt": rebuilt, "recovered": recovered,
                        "source_identity": identity, "reserve": reserve, "hmac_verified": True,
                        "wal_pages": 0, "bytes": total * _PAGE,
-                       "journal_bytes": journal_bytes, "written_bytes": written}
+                       "journal_bytes": journal_bytes, "written_bytes": written, **report}
     finally:
         conn.close()
 
 
 @contextmanager
 def open_decrypted_cache(src: Path, cache_dir: Path, enc_key: bytes, *,
-                         reserve=None, progress=None, force_rebuild=False):
+                         reserve=None, progress=None, force_rebuild=False,
+                         integrity_mode="full", conversation=None, source_identity_path=None):
     """Yield ``(plain_path, stats)`` under an exclusive cross-process lock.
 
     HMAC verification cannot be disabled. Failure before commit preserves the old
     baseline. Consumer exceptions after yield leave the committed cache reusable.
     A bad local plaintext hash fails closed; ``force_rebuild=True`` repairs it.
+    Policy/version/conversation changes require explicit force_rebuild. Selected
+    scope authenticates all nonzero pages and records complete zero-page numbers
+    even on reuse; zeros are retained, not authenticated or declared safe.
+    source_identity_path names the original source when src is a temporary copy.
     Source must be a stable offline snapshot, including unchanged sidecars.
     Read SQLite through ``mode=ro&immutable=1`` to avoid creating WAL/SHM.
 
@@ -346,6 +360,7 @@ def open_decrypted_cache(src: Path, cache_dir: Path, enc_key: bytes, *,
     plaintext page writes, including a possible reserve-byte correction.
     Auto-vacuum reclaims staged payloads at commit, leaving per-page hash metadata.
     """
+    policy = scoped_integrity.validate_policy(integrity_mode, conversation)
     src, root = Path(src).absolute(), Path(cache_dir).absolute()
     if len(enc_key) != sc.KEY_SIZE:
         raise ValueError("SQLCipher AES-256 密钥必须为 32 字节")
@@ -353,5 +368,5 @@ def open_decrypted_cache(src: Path, cache_dir: Path, enc_key: bytes, *,
     root.mkdir(parents=True, exist_ok=True)
     with _lock(root / "cache.lock"):
         _guard_paths(src, root)
-        result = _update(src, root, enc_key, reserve, progress, force_rebuild)
+        result = _update(src, root, enc_key, reserve, progress, force_rebuild, policy, source_identity_path)
         yield result

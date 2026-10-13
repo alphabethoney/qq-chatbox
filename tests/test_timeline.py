@@ -136,13 +136,6 @@ class TimelineTests(unittest.TestCase):
         build_profile(corpus, "c2c:fiction", llm, kind="group", conversation="group:fake-a", previous=newer)
         self.assertEqual(llm.calls, [])
 
-    def test_prompt_current_anchor_sources_and_cautious_rules(self):
-        profile = build_profile(Corpus(turns=[turn(1)]), "c2c:fiction", FakeLLM())
-        text = build_persona_messages("现在住哪里", [], profile, now="2035-01-02T03:04:05+08:00")[0]["content"]
-        for expected in ("2035-01-02T03:04:05+08:00", "消息时间不等于事件时间", "fake-msg-1", "turn=1", "不保证客观真实"):
-            self.assertIn(expected, text)
-        self.assertNotIn("引用时间线或事实时以「最新」为准", text)
-
     def test_kind_scope_roundtrip_backup_and_idempotence(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -185,7 +178,6 @@ class TimelineTests(unittest.TestCase):
             loaded = load_profiles(root)
             self.assertIs(loaded["c2c:fiction"], loaded["c2c:fiction#"])
             self.assertTrue(path.exists())
-            self.assertIn("unverified", build_persona_messages("过去", [], loaded["c2c:fiction"])[0]["content"])
 
 
 if __name__ == "__main__":

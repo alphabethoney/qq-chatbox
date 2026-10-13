@@ -14,6 +14,7 @@ llm:
   # 其他 OpenAI 兼容：
   # base_url: https://api.openai.com/v1
   api_key: ""               # 留空，走环境变量 QQ_CHATBOT_API_KEY / OPENAI_API_KEY
+  max_tokens: 260           # 单次回复上限，控输出
 
 embedding:
   provider: hash            # 本机 hash：零依赖、离线、与读取机 build 时一致
@@ -60,4 +61,4 @@ bridge:
   group_member_request_timeout: 10
   rate_limit_per_min: 30
   split_sentences: true    # 回复按句拆成多条逐条发出（更像真人）
-  max_sentences: 6
+  max_sentences: 3

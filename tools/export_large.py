@@ -8,6 +8,11 @@
 跳过已完成会话的 JSON/TXT 序列化与写盘。仍需扫描、解析、分桶和排序全部
 匹配消息，且需完整哈希源库及 WAL/journal；不减少数据库读取或峰值内存。
 
+--conversation / --kind / --after / --before 使用共享 metadata-first 查询；
+时间范围为闭开区间，并与既有 --since 严格大于条件取交集。--self-qq 可覆盖
+账号推断。--explain-query 仅输出查询计划和 metadata 推断信息，不写出状态。
+选择性输出绑定 .export-selection.json，改变范围时必须使用新输出目录。
+
 用法:
     python tools/export_large.py --db path/to/decrypted/nt_msg.db --out out
 """
@@ -29,8 +34,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from qq_exporter import db as dbmod
+from qq_exporter import selection as selection_engine
 from qq_exporter.db import _to_int, parse_body
 from qq_exporter.exporters import safe_name
+from qq_exporter.export_state import scope_payload, validate_scope, write_scope
 
 # 两个消息表列结构一致（本机 QQ 9.9.30），直接按字段号取
 MSG_COLS = [
@@ -205,64 +212,101 @@ def main() -> int:
     ap.add_argument("--strict", action="store_true", help="任何读取失败即终止，不允许坏页导出提交同步水位线")
     ap.add_argument("--immutable", action="store_true", help="仅用于稳定离线快照：不创建 SQLite sidecar、不读取 WAL")
     ap.add_argument("--resume", action="store_true", help="启用/恢复会话checkpoint；仍扫描全部匹配消息，仅跳过有效会话序列化与写盘")
+    selection_engine.add_arguments(ap)
     args = ap.parse_args()
+    try:
+        selection = selection_engine.selection_from_args(args)
+    except ValueError as exc:
+        ap.error(str(exc))
+    selected = selection.active
     formats = sorted(set(part.strip() for part in args.format.split(",") if part.strip()))
     if not formats or any(part not in ("json", "txt") for part in formats):
         ap.error("format 仅支持 json、txt 或 json,txt")
-    names = {}
-    names_fingerprint = None
-    if args.names:
-        names_path = Path(args.names).resolve()
-        names_text = names_path.read_text(encoding="utf-8")
-        names = {str(k): str(v) for k, v in json.loads(names_text).items()}
-        names_fingerprint = {"path": str(names_path), "sha256": hashlib.sha256(names_text.encode("utf-8")).hexdigest()}
 
     dbp = Path(args.db).resolve()
     out = Path(args.out)
     checkpoint_path = out / ".export-checkpoint.json"
     checkpoint = None
     source = None
-    if args.resume:
-        source = _source_fingerprint(dbp)
-        parameters = {"formats": formats, "since": args.since, "strict": args.strict,
-                      "names": names_fingerprint, "immutable": args.immutable}
-        if checkpoint_path.exists():
-            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
-            if checkpoint.get("version") != 1 or checkpoint.get("source") != source:
-                raise ValueError("resume 源数据库 fingerprint 不匹配，源文件已变化；请使用新的输出目录")
-            if checkpoint.get("parameters") != parameters:
-                raise ValueError("resume 导出参数不匹配；请使用原参数或新的输出目录")
-            if not isinstance(checkpoint.get("completed"), dict):
-                raise ValueError("resume checkpoint completed 无效")
-        else:
-            checkpoint = {"version": 1, "source": source, "parameters": parameters, "completed": {}, "scan_complete": False}
-        out.mkdir(parents=True, exist_ok=True)
-        checkpoint["complete"] = False
-        _save_checkpoint(checkpoint_path, checkpoint)
     uri = dbp.as_uri() + "?mode=ro" + ("&immutable=1" if args.immutable else "")
     conn = sqlite3.connect(uri, uri=True)
     conn.row_factory = sqlite3.Row
-
     try:
         conn.execute("BEGIN")
         tables = dbmod.detect_message_tables(conn)
-        print("消息表:", tables, flush=True)
         if not tables:
             raise RuntimeError("未识别到消息表，拒绝生成完整导出")
-        # Identity lookup is independent of since and shares the same snapshot.
-        me = None
-        for table, kind in tables:
-            if kind == "c2c":
-                quoted = table.replace('"', '""')
-                row = conn.execute(
-                    f'SELECT "40033" FROM "{quoted}" WHERE "40013"=1 AND "40033" IS NOT NULL LIMIT 1'
-                ).fetchone()
-                if row:
-                    me = str(row[0])
-                    break
+        columns = {table: dbmod.resolve_columns(conn, table) for table, _ in tables}
+        # Identity is inferred over the full snapshot, before time/peer filtering.
+        needs_private = any(kind == "c2c" and selection.matches_kind(kind) for _, kind in tables)
+        infer_identity = needs_private and selection.self_qq is None
+        if selected or args.explain_query:
+            me = selection.self_qq
+            if infer_identity:
+                me = selection_engine.infer_self(conn, [(t, k) for t, k in tables if k == "c2c"], required=selected)
+        else:
+            # Preserve the historical unfiltered entry point and mock contract.
+            me = None
+            for table, kind in tables:
+                if kind == "c2c":
+                    quoted = table.replace('"', '""')
+                    row = conn.execute(
+                        f'SELECT "40033" FROM "{quoted}" WHERE "40013"=1 AND "40033" IS NOT NULL LIMIT 1'
+                    ).fetchone()
+                    if row:
+                        me = str(row[0])
+                        break
+        if args.explain_query:
+            plans = [selection_engine.query_plan(
+                conn, table, kind, columns[table], selection, since=args.since, self_qq=me)
+                for table, kind in tables if selection.matches_kind(kind)]
+            print(json.dumps({"selection": selection.to_dict(), "effective_self_qq": me,
+                              "identity_inference": {"performed": infer_identity,
+                                                     "may_scan_metadata": infer_identity},
+                              "queries": plans}, ensure_ascii=False, indent=2))
+            return 0
+
+        names = {}
+        names_fingerprint = None
+        if args.names:
+            names_path = Path(args.names).resolve()
+            names_text = names_path.read_text(encoding="utf-8")
+            names = {str(k): str(v) for k, v in json.loads(names_text).items()}
+            names_fingerprint = {"path": str(names_path), "sha256": hashlib.sha256(names_text.encode("utf-8")).hexdigest()}
+        scope = scope_payload(dbp, selection, me,
+                              artifacts={"formats": formats, "single_json": False, "writer": "large"})
+        validate_scope(out, scope, active=selected)
+        if args.resume:
+            source = _source_fingerprint(dbp)
+            parameters = {"formats": formats, "since": args.since, "strict": args.strict,
+                          "names": names_fingerprint, "immutable": args.immutable,
+                          "selection": selection.to_dict(), "self_qq": me}
+            if checkpoint_path.exists():
+                checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+                if checkpoint.get("version") != 1 or checkpoint.get("source") != source:
+                    raise ValueError("resume 源数据库 fingerprint 不匹配，源文件已变化；请使用新的输出目录")
+                previous = checkpoint.get("parameters")
+                if isinstance(previous, dict) and "selection" not in previous and not selected:
+                    previous = {"selection": selection.to_dict(), "self_qq": me, **previous}
+                if previous != parameters:
+                    raise ValueError("resume 导出参数不匹配；请使用原参数或新的输出目录")
+                if not isinstance(checkpoint.get("completed"), dict):
+                    raise ValueError("resume checkpoint completed 无效")
+            else:
+                checkpoint = {"version": 1, "source": source, "parameters": parameters, "completed": {}, "scan_complete": False}
+            checkpoint["parameters"] = parameters
+        write_scope(out, scope, active=selected)
+        if checkpoint is not None:
+            out.mkdir(parents=True, exist_ok=True)
+            checkpoint["complete"] = False
+            _save_checkpoint(checkpoint_path, checkpoint)
     except BaseException:
         conn.close()
         raise
+    finally:
+        if args.explain_query:
+            conn.close()
+    print("消息表:", tables, flush=True)
     print("本账号 QQ:", me, flush=True)
 
     convs: "OrderedDict[str, dict]" = OrderedDict()
@@ -272,12 +316,24 @@ def main() -> int:
 
     def bucket(kind, row):
         nonlocal last_msg_time
-        m = _lean(tuple(row), me)
-        if m["time"] is not None and m["time"] > 10**12:
-            m["time"] = m["time"] / 1000
-        if m["time"] is None:
+        if selected:
+            m = selection_engine.normalize_metadata(row, kind, self_qq=me)
+            key, pq, pu = selection_engine.peer_of(m, kind, self_qq=me)
+            if m["time"] is not None and m["time"] > 10**12:
+                m["time"] = m["time"] / 1000
+        else:
+            m = _lean(tuple(row), me)
+            if m["time"] is not None and m["time"] > 10**12:
+                m["time"] = m["time"] / 1000
+            key, pq, pu = conv_key_of(kind, m)
+        if m["time"] is None or not math.isfinite(m["time"]):
             raise ValueError("消息缺少有效时间戳，无法可靠推进水位线")
-        key, pq, pu = conv_key_of(kind, m)
+        if selected:
+            blob = row.get("body")
+            text, segments = parse_body(bytes(blob)) if isinstance(blob, (bytes, bytearray)) else ("", [])
+            m["text"] = text
+            if segments:
+                m["segments"] = segments
         # IDs are only unique inside a conversation, not across tables/accounts.
         ident = (key, m["msg_id"]) if m["msg_id"] is not None else (key, json.dumps(m, sort_keys=True))
         if ident in seen:
@@ -290,10 +346,18 @@ def main() -> int:
         })
         c["messages"].append(m)
 
+    def rows_for(table, kind, *, reverse=False):
+        if selected:
+            return selection_engine.iter_rows(conn, table, kind, columns[table], selection,
+                                              since=args.since, reverse=reverse, self_qq=me)
+        return read_messages(conn, table, since=args.since, reverse=reverse)
+
     try:
         for table, kind in tables:
+            if not selection.matches_kind(kind):
+                continue
             try:
-                for row in read_messages(conn, table, since=args.since):
+                for row in rows_for(table, kind):
                     bucket(kind, row)
             except (sqlite3.DatabaseError, ValueError) as exc:
                 if args.strict:
@@ -301,7 +365,7 @@ def main() -> int:
                 errors.append(f"{table}: {exc}")
                 print(f"警告: {table} 读取不完整: {exc}", flush=True)
                 try:
-                    for row in read_messages(conn, table, since=args.since, reverse=True):
+                    for row in rows_for(table, kind, reverse=True):
                         bucket(kind, row)
                 except (sqlite3.DatabaseError, ValueError) as reverse_exc:
                     errors.append(f"{table} reverse: {reverse_exc}")
@@ -374,6 +438,7 @@ def main() -> int:
     _atomic_text(out / "json" / "index.json",
         json.dumps({"conversation_count": len(idx), "message_count": total, "conversations": idx,
                     "export": {"complete": not errors, "since": args.since,
+                               "selection": selection.to_dict(), "effective_self_qq": me,
                                "last_msg_time": last_msg_time, "errors": errors}},
                    ensure_ascii=False, indent=1))
     index_lines = [f"QQ 聊天记录导出索引\n\n会话数: {len(idx)}   消息数: {total:,}\n\n"]

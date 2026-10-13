@@ -86,6 +86,7 @@ class ChatIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             bot = make_bot(tmp)
             bot.config.retrieval.min_score = 0
+            bot.config.retrieval.persona_inject_retrieval = True
             # First populate a broad/private profile to catch accidental cache reuse.
             bot.answer("fiction", mode="persona", person=PERSON, kind="c2c")
             bot.llm.requests.clear()

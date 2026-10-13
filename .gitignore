@@ -5,12 +5,27 @@ _work/
 out/
 # 聊天机器人索引与人格档案（含聊天内容）
 .chatbot/
+.chatbot-*/
+.recovery-profiles/
+# 数据库、备份、密钥与日志不属于源码发布内容
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.sqlite3-*
+*.log
+*.pem
+*.key
+*.p12
+*.pfx
 # 本地凭据与个性化部署配置
 .env
 .env.*
 !.env.example
 *.local.yaml
 *.local.json
+# Persona 评测运行产物（可能含导入回复与盲评密钥）
+tools/persona_eval_results/
 # Python 缓存
 __pycache__/
 *.pyc

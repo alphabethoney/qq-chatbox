@@ -35,6 +35,9 @@ def build_conversations(
     limit: int | None = None,
     min_ids: dict[str, int] | None = None,
     progress=None,
+    selection=None,
+    self_qq=None,
+    connection=None,
 ) -> tuple[dict, list[Conversation]]:
     """读取数据库并返回 ``(元信息, 会话列表)``。
 
@@ -42,40 +45,56 @@ def build_conversations(
     """
     names = names or {}
     min_ids = min_ids or {}
-    conn = dbmod.connect(db_path)
+    conn = connection if connection is not None else dbmod.connect(db_path)
     try:
+        if not conn.in_transaction:
+            conn.execute("BEGIN")
         tables = dbmod.detect_message_tables(conn)
         if not tables:
             raise RuntimeError("数据库中没有找到消息表")
 
+        if selection is not None and selection.active:
+            from .selection import iter_rows, normalize_metadata, peer_of
+            tables = [(t, k) for t, k in tables if selection.matches_kind(k)]
+            self_qq = effective_self(conn, tables, selection, self_qq)
+
         buckets: "OrderedDict[str, Conversation]" = OrderedDict()
         total = 0
-        max_ids: dict[str, int] = {}
+        max_ids: dict[str, int] = {k: v for k, v in min_ids.items() if k != "*"}
         for table, kind in tables:
             columns = dbmod.resolve_columns(conn, table)
+            minimum = min_ids.get("*", min_ids.get(table))
+            if minimum is not None and "msg_id" not in columns:
+                raise ValueError(f"表 {table} 缺少消息 ID 列，不能应用 --since/增量水位")
             if progress:
                 progress(f"读取 {table}（{kind}）…")
-            table_max = min_ids.get(table, 0) or 0
-            for msg in dbmod.iter_messages(
-                conn,
-                table,
-                kind,
-                columns,
-                include_content=include_content,
-                min_id=min_ids.get(table),
-            ):
-                _key, conv = _bucket_for(buckets, kind, msg)
+            table_max = minimum
+            if selection is not None and selection.active:
+                rows = iter_rows(conn, table, kind, columns, selection,
+                                 min_id=minimum, self_qq=self_qq)
+                messages = (_selected_message(row, kind, self_qq, include_content, selection) for row in rows)
+            else:
+                messages = dbmod.iter_messages(conn, table, kind, columns,
+                                               include_content=include_content, min_id=minimum)
+            for msg in messages:
+                if selection is not None and selection.active:
+                    identity = peer_of(msg, kind, self_qq=self_qq)
+                else:
+                    identity = None
+                _key, conv = _bucket_for(buckets, kind, msg, identity=identity)
                 conv.messages.append(msg)
                 total += 1
                 if msg.get("msg_id") is not None:
-                    table_max = max(table_max, msg["msg_id"])
+                    table_max = max(table_max, msg["msg_id"]) if table_max is not None else msg["msg_id"]
                 if limit and total >= limit:
                     break
-            max_ids[table] = table_max
+            if table_max is not None:
+                max_ids[table] = table_max
             if limit and total >= limit:
                 break
     finally:
-        conn.close()
+        if connection is None:
+            conn.close()
 
     for conv in buckets.values():
         conv.title = _apply_name(conv, names)
@@ -91,6 +110,76 @@ def build_conversations(
         "last_ids": max_ids,
     }
     return meta, list(buckets.values())
+
+
+def effective_self(conn, tables, selection, self_qq=None):
+    """Resolve identity only when a selected private table can be read."""
+    from .selection import infer_self
+    explicit = self_qq if self_qq is not None else selection.self_qq
+    if explicit is not None:
+        return explicit
+    if any(kind == "c2c" and selection.matches_kind(kind) for _, kind in tables):
+        return infer_self(conn, tables=tables, required=True)
+    return None
+
+
+def _selected_message(data, kind, self_qq, include_content, selection):
+    from .selection import normalize_metadata
+    msg = normalize_metadata(data, kind, self_qq=self_qq)
+    if (selection.after is not None or selection.before is not None) and msg.get("time") is None:
+        raise ValueError("时间筛选遇到未知时间，无法确认消息是否属于所选区间")
+    blob = data.get("body")
+    blob = bytes(blob) if isinstance(blob, (bytes, bytearray, memoryview)) else None
+    text, segments = dbmod.parse_body(blob) if blob else ("", [])
+    msg["text"] = text
+    if segments:
+        msg["segments"] = segments
+    if blob:
+        media = dbmod.extract_media(blob)
+        if media:
+            msg["media"] = media
+    if include_content and blob:
+        try:
+            msg["raw"] = dbmod.wire.to_dict(blob, max_depth=4)
+        except Exception:
+            msg["raw_hex"] = blob.hex()
+    return msg
+
+
+def list_conversations(db_path, *, kind=None, names=None, self_qq=None, standard_layout=False):
+    """Aggregate metadata only; never select or decode message bodies."""
+    from .selection import Selection, iter_rows, normalize_metadata, peer_of
+    selection = Selection(kind=kind, self_qq=self_qq, standard_layout=standard_layout)
+    conn = dbmod.connect(db_path)
+    try:
+        conn.execute("BEGIN")
+        tables = [(t, k) for t, k in dbmod.detect_message_tables(conn) if selection.matches_kind(k)]
+        identity = effective_self(conn, tables, selection)
+        entries = {}
+        for table, table_kind in tables:
+            columns = dbmod.resolve_columns(conn, table)
+            for row in iter_rows(conn, table, table_kind, columns, selection,
+                                 self_qq=identity, metadata_only=True):
+                msg = normalize_metadata(row, table_kind, self_qq=identity)
+                key, peer_qq, peer_uid = peer_of(msg, table_kind, self_qq=identity)
+                entry = entries.setdefault(key, {
+                    "key": key, "kind": table_kind,
+                    "title": (names or {}).get(key, (names or {}).get(key.split(":", 1)[1], str(peer_qq or peer_uid or "未知"))),
+                    "message_count": 0, "first_time": None, "last_time": None,
+                    "unknown_time_count": 0,
+                })
+                entry["message_count"] += 1
+                timestamp = msg.get("time")
+                if timestamp is not None and timestamp > 10**12:
+                    timestamp /= 1000
+                if timestamp is None:
+                    entry["unknown_time_count"] += 1
+                else:
+                    entry["first_time"] = timestamp if entry["first_time"] is None else min(timestamp, entry["first_time"])
+                    entry["last_time"] = timestamp if entry["last_time"] is None else max(timestamp, entry["last_time"])
+        return sorted(entries.values(), key=lambda entry: entry["key"])
+    finally:
+        conn.close()
 
 
 def _peer_of(msg: dict, kind: str) -> tuple[str, str | None, str | None]:
@@ -119,8 +208,8 @@ def _peer_of(msg: dict, kind: str) -> tuple[str, str | None, str | None]:
     return f"c2c:{ident}", (str(person_qq) if person_qq is not None else None), person_uid
 
 
-def _bucket_for(buckets, kind: str, msg: dict) -> tuple[str, Conversation]:
-    key, peer_qq, peer_uid = _peer_of(msg, kind)
+def _bucket_for(buckets, kind: str, msg: dict, *, identity=None) -> tuple[str, Conversation]:
+    key, peer_qq, peer_uid = identity or _peer_of(msg, kind)
     conv = buckets.get(key)
     if conv is None:
         title = str(peer_qq or peer_uid or "未知")

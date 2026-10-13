@@ -45,6 +45,7 @@ class RetrievalConfig:
     top_k: int = 8
     vector_weight: float = 0.7
     min_score: float = 0.35
+    persona_inject_retrieval: bool = False  # persona 默认仅用档案和历史；QA 不受影响
 
 
 @dataclass
@@ -148,6 +149,7 @@ _ENV_MAP = {
     "QQ_CHATBOT_EMBEDDING_API_KEY": ("embedding", "api_key"),
     "QQ_CHATBOT_ADMIN_TOKEN": ("observability", "admin_token"),
     "QQ_CHATBOT_BRIDGE_WS": ("bridge", "ws_url"),
+    "QQ_CHATBOT_PERSONA_INJECT_RETRIEVAL": ("retrieval", "persona_inject_retrieval"),
     "QQ_CHATBOT_BRIDGE_MODE": ("bridge", "mode"),
 }
 
@@ -202,6 +204,7 @@ def load_config(path: str | Path | None = None, overrides: dict | None = None) -
     _coerce_numbers(cfg)
     for obj, names in ((cfg.llm, ("redact",)),
                        (cfg.embedding, ("fallback_to_hash",)),
+                       (cfg.retrieval, ("persona_inject_retrieval",)),
                        (cfg.memory, ("enabled",)),
                        (cfg.observability, ("enabled", "include_content")),
                        (cfg.bridge, ("merge_group_into_private", "restrict_group_scope", "split_sentences", "group_member_check"))):

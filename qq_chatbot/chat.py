@@ -120,9 +120,11 @@ class Chatbot:
         profile = profile or PersonaProfile(speaker=person)
         if self.config.bridge.persona_name:
             profile.name = self.config.bridge.persona_name
-        msgs = build_persona_messages(query, retrieved, profile, history)
+        # 关闭时不把检索候选送给生成，也不将未使用的候选标成回答出处。
+        good = ([rt for rt in retrieved if rt.score >= self.config.retrieval.min_score]
+                if self.config.retrieval.persona_inject_retrieval else [])
+        msgs = build_persona_messages(query, good, profile, history)
         text = self.llm.chat(msgs, temperature=temp, max_tokens=max_tokens)
-        good = [rt for rt in retrieved if rt.score >= self.config.retrieval.min_score]
         return self._finish(query, mode, retrieved,
                             Answer(text, [self._cite(rt) for rt in good[:5]], grounded=bool(good)), started)
 

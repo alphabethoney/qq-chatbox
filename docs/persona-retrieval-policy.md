@@ -1,0 +1,57 @@
+# Persona 检索注入策略与本地验证
+
+## 结论
+
+本次固定初版提示词基线（`ef3e243`），暂不向 persona 生成注入检索片段，保留 `retrieval.min_score = 0.35`，以显式开关支持后续单变量比较。这个选择针对低相关检索噪声风险，不代表已经证明关闭检索会在所有场景更像本人。此前 `docs/persona-prompt-review.md` 是 `04847f7` 的历史分析；其中关于执行器故障和未提交的记录保留为当时状态，本文件记录本次的新状态。
+
+## 配置与行为
+
+```json
+{
+  "retrieval": {
+    "min_score": 0.35,
+    "persona_inject_retrieval": false
+  }
+}
+```
+
+- 默认关闭；旧配置缺少字段也关闭。设为 `true` 才向 persona 输入分数 `>= min_score` 的片段，等于阈值保留，顺序不变。
+- 可通过环境变量 `QQ_CHATBOT_PERSONA_INJECT_RETRIEVAL=true/false` 设置，优先级为默认 < 配置文件 < 环境变量 < overrides。配置保存包含该字段，非法布尔值会报错。
+- 关闭时仍保留人格档案、最近对话和当前问题，并正常生成；出处为空，`grounded=False`。开启时出处取实际注入的达标片段前五条，`grounded` 只表示存在注入的检索证据，不认证整段回复。
+- 仍检索候选并保留原有 trace 候选记录以便诊断，但关闭时这些候选不进入 persona 生成。这个开关不关闭档案提炼、已有档案内容、会话记忆或历史输入。
+- QA 完全沿用原来阈值过滤、无证据提前返回、达标证据生成及出处逻辑，不受该开关影响。
+- `prompt.py` 未修改，未增加句数、身份或时间线规则。
+
+## 实现与验证范围
+
+`qq_chatbot/config.py` 新增默认值、环境映射和布尔验证；`qq_chatbot/chat.py` 按开关决定注入列表。测试覆盖默认关闭时高分也不注入、档案/历史/问题保留，开启后的混合分数/阈值边界/零阈值，QA 开关无关性以及配置序列化、优先级和非法输入。已有群聊出处集成测试显式开启检索，继续验证出处作用域。
+
+固定评测集、工具和评分口径见 [persona-evaluation.md](persona-evaluation.md)。16 条开发集和 8 条留出集使用虚构人物与固定输入；留出集独立，默认开发运行不读取它。离线契约分只能验证输入与出处策略，五维人工分必须来自实际回复评审，不能由 mock 的通过率代替。
+
+## 本次运行结果
+
+- 自检：系统 `python -V` 与 `.venv\Scripts\python.exe -V` 均输出 Python 3.14.7；文件工具成功读取历史评审文档。测试使用仓库 `.venv`，不依赖系统环境的包。
+- 开关与配置的 9 条定向回归全部通过。
+- `git diff --exit-code ef3e243 -- qq_chatbot/prompt.py` 成功且无差异，确认初版提示词基线未变化。
+- 全量验证：`.venv\Scripts\python.exe -m unittest discover -s tests`，`Ran 198 tests in 16.841s`，`OK`，退出码 0。包括 5 条评测工具集成测试；真实 LLM 的 CLI 参数路径由假模型验证，没有联网。
+- `git diff --check` 通过；Git 状态未显示 `.chatbot/` 或 `prompt.py` 改动。
+- 实现和提示词冻结后，运行以下命令，24 条场景全部完成，退出码 0：
+
+```powershell
+.venv\Scripts\python.exe -B tools/persona_eval.py run --split all --output tools/persona_eval_results/verification-opt-in-v1
+```
+
+| 集合 | 场景数 | 检索关闭契约分 | 检索开启契约分 |
+| --- | ---: | ---: | ---: |
+| 开发集 | 16 | 112/112 | 112/112 |
+| 留出集 | 8 | 56/56 | 56/56 |
+
+共 336/336 项通过。报告输出到 `tools/persona_eval_results/verification-opt-in-v1/report.md`，开发/留出原始结果独立保存，终端也打印分数。评测产物目录已加入 `.gitignore`，避免运行产物、导入回复及盲评映射进入提交；固定场景、工具、测试与本说明参与本地提交。
+
+开发输入 SHA256：`61eb59d3720780341777d433fc1ad3692e481122c8eb2267abe22f24fe70db4a`。留出输入 SHA256：`833880ad31b586036400ec89e01b546e9312486ad23600d61a00b54866711641`。
+
+五项人工维度全部 `UNSCORED`。本次只证明开关与编排契约符合预期，不宣称 persona 回复质量已提高，也未使用留出集改词或调参。真实端点连通性与真实模型生成质量没有验证；可用工具导入实际回复或显式运行模型后再盲评。重复运行应换一个新的输出目录名。
+
+## 操作边界
+
+本节记录当时的操作边界：仅修改本项目工作区，未访问远端部署目录，未修改服务器提示词、配置、索引或 systemd；未修改本地 `.chatbot/` 索引数据，也未操作其他项目。当时仅本地提交，未推送远端。

@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import BinaryIO, Callable, Iterable
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from . import integrity as scoped_integrity
 
 # ---- 常量 -----------------------------------------------------------------
 
@@ -248,7 +249,14 @@ def _file_stamp(fh: BinaryIO) -> tuple[int, int, int, int]:
 def _decode_checked_page(
     page: bytes, enc_key: bytes, pgno: int, reserve: int,
     hmac_key: bytes | None = None, salt: bytes | None = None,
+    *, allow_zero: bool = False,
 ) -> bytes:
+    if len(page) != PAGE_SIZE:
+        raise ValueError("SQLCipher 页面长度不完整")
+    if not any(page):
+        if pgno != 1 and allow_zero:
+            return page
+        raise ValueError(f"SQLCipher 第 {pgno} 页全零，不能认证")
     skip = SALT_SIZE if pgno == 1 else 0
     plain = decrypt_page(page, enc_key, skip_salt=skip, reserve=reserve)
     if hmac_key is not None:
@@ -274,6 +282,7 @@ def _scan_wal(
     wal_path: Path, spool: BinaryIO, enc_key: bytes, reserve: int,
     page_size: int, progress: Progress | None,
     hmac_key: bytes | None = None, salt: bytes | None = None,
+    *, allow_zero: bool = False, zero_pages: list[int] | None = None,
 ) -> tuple[int, int]:
     """Validate into a disk spool; return last committed frame count and db size.
 
@@ -323,7 +332,10 @@ def _scan_wal(
             state = _wal_checksum(fh[:8] + page, state, order)
             if state != (fc0, fc1):
                 raise ValueError("WAL 帧 checksum 校验失败")
-            plain = _decode_checked_page(page, enc_key, pgno, reserve, hmac_key, salt)
+            plain = _decode_checked_page(page, enc_key, pgno, reserve, hmac_key, salt,
+                                         allow_zero=allow_zero)
+            if zero_pages is not None and not any(page):
+                zero_pages.append(pgno)
             spool.write(struct.pack(">II", pgno, size))
             spool.write(plain)
             if size:
@@ -376,10 +388,12 @@ def _apply_wal_file(fout, frames: list[tuple[int, bytes]], db_size: int, page_si
 def _merge_wal(
     fout: BinaryIO, wal_path: Path, enc_key: bytes, reserve: int,
     progress: Progress | None, hmac_key: bytes | None, salt: bytes,
+    *, allow_zero: bool = False, zero_pages: list[int] | None = None,
 ) -> int:
     with tempfile.TemporaryFile() as spool:
         committed, _ = _scan_wal(
-            wal_path, spool, enc_key, reserve, PAGE_SIZE, progress, hmac_key, salt
+            wal_path, spool, enc_key, reserve, PAGE_SIZE, progress, hmac_key, salt,
+            allow_zero=allow_zero, zero_pages=zero_pages,
         )
         for _ in range(committed):
             pgno, size = struct.unpack(">II", spool.read(8))
@@ -405,6 +419,9 @@ def decrypt_database(
     merge_wal: bool = True,
     progress: Progress | None = None,
     verify_hmac: bool = True,
+    integrity_mode: str = "full",
+    conversation: str | None = None,
+    source_identity_path: Path | None = None,
 ) -> dict:
     """流式解密稳定的离线 NTQQ 快照，完成后原子替换目标文件。
 
@@ -412,8 +429,13 @@ def decrypt_database(
     verify_hmac=False，此时仅有 SQLite 结构检查和 WAL checksum，不能认证页面。
     WAL 使用临时磁盘空间，内存与库/WAL 大小无关。异常不会发布部分输出。
     完整解密但 SQLite 检查失败时保留兼容行为：发布诊断文件并返回 ok=False。
+    selected 必须明确 c2c 会话并认证所有非零页，完整非首页零页原样保留并报告。
+    selected 只按 c2c 表与索引验收，失败不发布；不表示整库修复或零页安全。
+    source_identity_path 可指定原始路径，让不同临时快照拥有稳定来源身份。
     本函数不提供断点恢复：没有稳定快照身份及持久化认证检查点时不能安全跳页。
     """
+    policy = scoped_integrity.validate_policy(integrity_mode, conversation, verify_hmac=verify_hmac)
+    zero_pages = []
     src, dst = Path(src), Path(dst)
     wal_path = Path(str(src) + "-wal")
     for protected in (src, wal_path):
@@ -433,7 +455,8 @@ def decrypt_database(
             if payload_size < PAGE_SIZE or payload_size % PAGE_SIZE:
                 raise ValueError("数据库内容不足一页或末页截断")
             total_pages = payload_size // PAGE_SIZE
-            fin.seek(EXT_HEADER)
+            fin.seek(0)
+            source_header = fin.read(EXT_HEADER)
             page1_enc = fin.read(PAGE_SIZE)
             if reserve is None:
                 reserve = detect_reserve(page1_enc, enc_key)
@@ -452,8 +475,12 @@ def decrypt_database(
                 temp_path = Path(fout.name)
                 fin.seek(EXT_HEADER)
                 for pgno in range(1, total_pages + 1):
+                    encrypted = fin.read(PAGE_SIZE)
+                    if len(encrypted) == PAGE_SIZE and not any(encrypted):
+                        zero_pages.append(pgno)
                     plain = _decode_checked_page(
-                        fin.read(PAGE_SIZE), enc_key, pgno, reserve, hmac_key, salt
+                        encrypted, enc_key, pgno, reserve, hmac_key, salt,
+                        allow_zero=integrity_mode == "selected",
                     )
                     fout.write(plain)
                     if progress and (pgno % 512 == 0 or pgno == total_pages):
@@ -461,7 +488,8 @@ def decrypt_database(
                 wal_pages = 0
                 if merge_wal:
                     wal_pages = _merge_wal(
-                        fout, wal_path, enc_key, reserve, progress, hmac_key, salt
+                        fout, wal_path, enc_key, reserve, progress, hmac_key, salt,
+                        allow_zero=integrity_mode == "selected", zero_pages=zero_pages,
                     )
                 if _file_stamp(fin) != source_stamp:
                     raise ValueError("主库在读取期间发生变化；请使用稳定的离线快照")
@@ -493,6 +521,13 @@ def decrypt_database(
             "integrity": integrity,
             "hmac_verified": verify_hmac,
         }
+        stats.update(scoped_integrity.inspect_integrity(
+            temp_path, policy=policy, full_result=integrity,
+            zero_pages=zero_pages, verify_hmac=verify_hmac))
+        stats["source_identity"] = scoped_integrity.source_identity(
+            source_identity_path or src, source_header, salt, reserve)
+        if integrity_mode == "selected" and not stats["accepted"]:
+            raise ValueError(f"selected integrity 检查失败: {stats['selected_integrity']}")
         with open(temp_path, "r+b") as fh:
             os.fsync(fh.fileno())
         os.replace(temp_path, dst)
