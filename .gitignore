@@ -18,6 +18,11 @@ out/
 *.key
 *.p12
 *.pfx
+# 私有历史备份及数据库口令产物
+*.bundle
+passphrase.json
+passphrase.txt
+keys*.json
 # 本地凭据与个性化部署配置
 .env
 .env.*

@@ -1,6 +1,6 @@
 # 数字分身：提示词演变判断与检索入口修复
 
-> 本文保留 `04847f7` 阶段的分析与当时验证状态。后续 `ef3e243` 已将提示词回退初版；本次默认关闭 persona 检索注入的显式开关、评测和新验证结果见 [persona-retrieval-policy.md](persona-retrieval-policy.md) 与 [persona-evaluation.md](persona-evaluation.md)。
+> 本文保留早期检索过滤阶段的技术分析。后续提示词已回退初版；默认关闭 persona 检索注入的显式开关、评测和验证结果见 [persona-retrieval-policy.md](persona-retrieval-policy.md) 与 [persona-evaluation.md](persona-evaluation.md)。
 
 ## 结论与证据边界
 
@@ -55,24 +55,6 @@
 
 这些测试验证编排契约，不能证明真人感已经提升。
 
-## 验证结果与未完成项
+## 验证边界
 
-已用文件读取工具复核实际改动、数据类构造参数、Session 历史接口及测试逻辑。尚未取得可执行测试结果。
-
-尝试运行 `python -m unittest discover -s tests`，命令执行工具无输出，退出码 `3221225794`（`0xC0000142`）。独立的 `Get-Location` 也以相同状态码失败，子 agent 的只读诊断复现该故障，指向 PowerShell 执行器启动环境异常。不能将它记为 unittest 失败或通过，也不能据此断言 Python/Git 自身有故障。
-
-`git status`、`git diff --check` 和差异审查命令同样无法执行。因此未能获取初始工作树状态，也未完成本地 git commit。为避免误收用户已有改动，未手工改写 Git 索引、引用或对象。待执行器恢复后，应先检查工作树、确认本次差异，再运行以下命令；仅暂存本次三个文件中的自身改动：
-
-```powershell
-python -m unittest discover -s tests
-git diff --check
-git diff -- qq_chatbot/chat.py
-git status --short
-# 工作树检查确认没有混入已有改动后：
-git add -- qq_chatbot/chat.py tests/test_persona_retrieval_filter.py docs/persona-prompt-review.md
-git commit -m "fix: filter low-score evidence before persona generation"
-```
-
-结论打印到标准输出的请求也受同一执行器启动故障影响，未能完成。本文保存了完整结论，并在会话最终回复中给出主要判断；不把工具返回的文件内容冒充进程 stdout。
-
-一次扩大执行权限的尝试被拒，原因是当前没有审批通道；后续保持 workspace-write。本次没有服务器访问、服务重启、其他仓库操作或 `.chatbot/` 数据写入。
+本文件是历史技术分析，不作为当前部署或模型质量的验收证明。后续自动回归与输入策略验证见 [检索策略](<persona-retrieval-policy.md>)；当前项目测试与发布边界见 [项目进度](<PROJECT-STATUS.md>)。公开版本不保留个体环境操作纪要。
